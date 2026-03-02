@@ -1,0 +1,13 @@
+country,year,unemployment,interest_rate
+USA,2018,4.0,2.5
+USA,2019,3.8,2.5
+USA,2020,8.0,0.5
+USA,2021,5.5,0.5
+UK,2018,4.5,1.5
+UK,2019,4.2,1.5
+UK,2020,5.0,0.25
+UK,2021,4.8,0.25
+Germany,2018,3.5,1.0
+Germany,2019,3.2,1.0
+Germany,2020,4.0,0.0
+Germany,2021,3.6,0.0
