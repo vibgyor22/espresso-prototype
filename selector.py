@@ -1,53 +1,76 @@
-from model_specs import MODEL_SPECS, QUESTION_MODEL_MAP
+"""
+Model selector for Espresso.
+
+Given a parsed intent and a loaded dataframe, returns:
+  valid    : list of admissible model names, ordered by preference
+  rejected : dict of {model_name: reason_string} for failed checks
+"""
+
+import pandas as pd
+
 from data_utils import is_panel_data, treatment_varies
+from model_specs import MODEL_SPECS, QUESTION_MODEL_MAP
+
 
 def select_admissible_models(intent, data):
     """
-    This is the brain of Espresso. It decides which statistical
-    models are valid for your question and data.
-    
+    Filter candidate models for the given intent and dataset.
+
+    Checks:
+      1. Required intent fields are present.
+      2. Panel structure exists when required.
+      3. Treatment varies within units when required.
+      4. Strict positivity holds for log models.
+
     Returns:
-    - valid: list of models that can be used
-    - rejected: dictionary of models that can't be used and why
+        valid: list[str] where the first entry is the recommended model.
+        rejected: dict[str, str] explaining why a model could not run.
     """
-    
-    # Get the type of question (causal or forecast)
     question_type = intent.get("question_type")
     if question_type not in QUESTION_MODEL_MAP:
-        return [], {"error": "Unknown question type"}
-    
-    # Get all models that could work for this type of question
+        return [], {"error": f"Unknown question type: '{question_type}'"}
+
     candidates = QUESTION_MODEL_MAP[question_type]
     valid = []
     rejected = {}
 
-    # Check each candidate model
     for model in candidates:
         spec = MODEL_SPECS[model]
-        
-        # Check 1: Does the question have all required information?
-        missing_fields = []
-        for field in spec["required_fields"]:
-            if intent.get(field) is None:
-                missing_fields.append(field)
-        
-        if missing_fields:
-            rejected[model] = f"Missing: {', '.join(missing_fields)}"
+
+        missing = [field for field in spec["required_fields"] if intent.get(field) is None]
+        if missing:
+            rejected[model] = f"Missing required fields: {', '.join(missing)}"
             continue
-        
-        # Check 2: Is the data structure correct?
+
         if spec.get("requires_panel"):
             if not is_panel_data(data, intent.get("unit"), intent.get("time")):
-                rejected[model] = "Need panel data (units over time)"
+                rejected[model] = (
+                    "Panel structure required but not found "
+                    f"(need unit='{intent.get('unit')}' and time='{intent.get('time')}')"
+                )
                 continue
-        
-        # Check 3: Does treatment vary? (for causal questions)
+
         if spec.get("requires_treatment_variation"):
             if not treatment_varies(data, intent.get("treatment"), intent.get("unit")):
-                rejected[model] = "Treatment doesn't vary - can't measure effect"
+                rejected[model] = (
+                    f"Predictor '{intent.get('treatment')}' does not vary within units"
+                )
                 continue
-        
-        # If we got here, this model is valid!
+
+        outcome = intent.get("outcome")
+        treatment = intent.get("treatment")
+        if spec.get("requires_positive_outcome"):
+            y = pd.to_numeric(data[outcome], errors="coerce").dropna()
+            if y.empty or (y <= 0).any():
+                rejected[model] = f"Outcome '{outcome}' must be strictly positive"
+                continue
+
+        if spec.get("requires_positive_treatment"):
+            x = pd.to_numeric(data[treatment], errors="coerce").dropna()
+            if x.empty or (x <= 0).any():
+                rejected[model] = f"Predictor '{treatment}' must be strictly positive"
+                continue
+
         valid.append(model)
-    
+
     return valid, rejected

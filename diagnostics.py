@@ -1,343 +1,591 @@
 """
-Pre-analysis statistical diagnostics and corrections.
-Performs checks like stationarity, heteroscedasticity, multicollinearity, etc.
+Pre-analysis diagnostics for Espresso.
+
+Tests:
+  - ADF stationarity (statsmodels if available, otherwise manual approximation)
+  - KPSS stationarity (statsmodels if available)
+  - Parallel trends (regression-based, for DiD)
+  - Breusch-Pagan heteroscedasticity
+  - Durbin-Watson autocorrelation
+  - Ljung-Box portmanteau test on ARIMA residuals
+  - Shapiro-Wilk normality
+  - VIF multicollinearity
 """
 
 import pandas as pd
 import numpy as np
 from scipy import stats
 
-
-def check_heteroscedasticity(residuals, y_fitted):
-    """Breusch-Pagan test for heteroscedasticity."""
-    try:
-        # Regress squared residuals on fitted values
-        n = len(residuals)
-        u_squared = residuals ** 2
-        
-        # Mean of squared residuals
-        u_bar = np.mean(u_squared)
-        
-        # Sum of squares for regression
-        y_centered = y_fitted - np.mean(y_fitted)
-        ss_y = np.sum(y_centered ** 2)
-        ss_u = np.sum((u_squared - u_bar) ** 2)
-        
-        if ss_y == 0:
-            return {'test': 'Breusch-Pagan', 'statistic': np.nan, 'p_value': np.nan, 'interpretation': 'Unable to compute (zero variance in fitted values)'}
-        
-        # LM statistic approximation
-        lm = (ss_u / ss_y) * (n / 2)
-        p_value = 1 - stats.chi2.cdf(lm, df=1)
-        
-        is_heteroscedastic = p_value < 0.05
-        interpretation = "HETEROSCEDASTIC detected (p<0.05)" if is_heteroscedastic else "Homoscedastic (OK)"
-        
-        return {
-            'test': 'Breusch-Pagan',
-            'statistic': lm,
-            'p_value': p_value,
-            'is_violated': is_heteroscedastic,
-            'interpretation': interpretation,
-            'correction': 'Use robust standard errors (HC1)' if is_heteroscedastic else 'No correction needed'
-        }
-    except Exception as e:
-        return {'test': 'Breusch-Pagan', 'error': str(e)}
+try:
+    from statsmodels.tsa.stattools import adfuller, kpss
+    from statsmodels.stats.stattools import durbin_watson
+    from statsmodels.stats.diagnostic import acorr_ljungbox
+    STATSMODELS_AVAILABLE = True
+except ImportError:
+    STATSMODELS_AVAILABLE = False
 
 
-def check_multicollinearity(X):
-    """Compute VIF (Variance Inflation Factor) for multicollinearity."""
-    try:
-        # VIF = 1 / (1 - R²) where R² is from regressing each X on others
-        vif_values = []
-        
-        if X.shape[1] < 2:
-            return {
-                'test': 'VIF (Variance Inflation Factor)',
-                'vif_values': [],
-                'is_violated': False,
-                'interpretation': 'Only one regressor (no multicollinearity)',
-                'correction': 'No correction needed'
-            }
-        
-        for i in range(X.shape[1]):
-            # Remove column i
-            X_rest = np.delete(X, i, axis=1)
-            y_col = X[:, i]
-            
-            # Fit regression
-            try:
-                coeffs = np.linalg.lstsq(X_rest, y_col, rcond=None)[0]
-                y_pred = X_rest @ coeffs
-                ss_res = np.sum((y_col - y_pred) ** 2)
-                ss_tot = np.sum((y_col - np.mean(y_col)) ** 2)
-                r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-                vif = 1 / (1 - r_squared) if r_squared < 1 else np.inf
-            except:
-                vif = np.nan
-            
-            vif_values.append(vif)
-        
-        max_vif = np.nanmax(vif_values) if vif_values else np.nan
-        is_violated = max_vif > 10 if not np.isnan(max_vif) else False
-        
-        return {
-            'test': 'VIF (Variance Inflation Factor)',
-            'vif_values': vif_values,
-            'max_vif': max_vif,
-            'is_violated': is_violated,
-            'interpretation': f"High multicollinearity (max VIF={max_vif:.2f})" if is_violated else f"Low multicollinearity (max VIF={max_vif:.2f})",
-            'correction': 'Consider removing highly correlated variables' if is_violated else 'No correction needed'
-        }
-    except Exception as e:
-        return {'test': 'VIF', 'error': str(e)}
-
+# ---------------------------------------------------------------------------
+# Individual test functions
+# ---------------------------------------------------------------------------
 
 def check_stationarity(series, name='series'):
-    """Augmented Dickey-Fuller test for stationarity."""
+    """
+    ADF test for unit root.
+
+    Uses statsmodels adfuller (proper MacKinnon critical values) when
+    available; falls back to a manual t-statistic approximation otherwise.
+    """
     try:
-        series_clean = series.dropna()
-        
-        if len(series_clean) < 4:
+        s = pd.Series(series).dropna()
+        if len(s) < 4:
             return {
                 'test': 'ADF (Augmented Dickey-Fuller)',
                 'series_name': name,
                 'is_stationary': None,
-                'interpretation': 'Insufficient data for test',
-                'correction': 'Need at least 4 observations'
+                'interpretation': 'Insufficient data for ADF test (need >= 4 obs)',
+                'correction': 'Need at least 4 observations',
+                'is_violated': False
             }
-        
-        # Simple ADF approximation: regress ΔY on Y_{t-1}
-        y = series_clean.values
-        dy = np.diff(y)  # First difference
-        y_lag = y[:-1]   # Lagged values
-        
-        # Regress dy on y_lag
-        X = np.vstack([np.ones(len(y_lag)), y_lag]).T
+
+        if STATSMODELS_AVAILABLE:
+            adf_stat, adf_pval, _, _, crit, _ = adfuller(s, autolag='AIC')
+            is_stationary = adf_pval < 0.05
+            return {
+                'test': 'ADF (Augmented Dickey-Fuller)',
+                'series_name': name,
+                'test_statistic': float(adf_stat),
+                'p_value': float(adf_pval),
+                'critical_values': {k: float(v) for k, v in crit.items()},
+                'is_stationary': is_stationary,
+                'is_violated': not is_stationary,
+                'interpretation': (
+                    f"STATIONARY (ADF p={adf_pval:.4f})" if is_stationary
+                    else f"NON-STATIONARY (ADF p={adf_pval:.4f}) — differencing may be needed"
+                ),
+                'correction': 'No correction needed' if is_stationary else 'Apply first differencing (d=1)'
+            }
+
+        # Manual fallback: regress Δy on y_{t-1}, compare t to -2.86 (5% critical)
+        y = s.values
+        dy = np.diff(y)
+        y_lag = y[:-1]
+        X = np.column_stack([np.ones(len(y_lag)), y_lag])
         try:
             coeffs = np.linalg.lstsq(X, dy, rcond=None)[0]
             residuals = dy - X @ coeffs
-            ss_res = np.sum(residuals ** 2)
-            ss_tot = np.sum((dy - np.mean(dy)) ** 2)
-            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-            
-            # Estimate SE of coefficient
             n = len(dy)
-            mse = ss_res / (n - 2)
-            X_inv = np.linalg.inv(X.T @ X)
-            se_beta = np.sqrt(mse * X_inv[1, 1])
-            t_stat = coeffs[1] / se_beta if se_beta > 0 else 0
-            
-            # Critical value for ADF (simplified): ~-2.86 at 5% for n=50+
-            is_stationary = t_stat < -2.86
-            p_value = 0.05 if is_stationary else 0.95  # Simplified
-            
-        except:
-            is_stationary = None
-            p_value = np.nan
-        
+            mse = np.sum(residuals ** 2) / max(n - 2, 1)
+            var_beta = mse * np.linalg.inv(X.T @ X)[1, 1]
+            t_stat = float(coeffs[1] / np.sqrt(var_beta)) if var_beta > 0 else 0.0
+        except Exception:
+            t_stat = 0.0
+
+        is_stationary = t_stat < -2.86
         return {
             'test': 'ADF (Augmented Dickey-Fuller)',
             'series_name': name,
+            'test_statistic': t_stat,
+            'p_value': 0.05 if is_stationary else 0.95,
             'is_stationary': is_stationary,
-            'interpretation': 'STATIONARY (OK)' if is_stationary else 'NON-STATIONARY - differencing required',
-            'correction': 'Use first differences (AR(1) differencing)' if not is_stationary else 'No correction needed',
-            'test_statistic': t_stat if 't_stat' in locals() else np.nan,
-            'p_value': p_value
+            'is_violated': not is_stationary,
+            'interpretation': (
+                'STATIONARY (OK)' if is_stationary
+                else 'NON-STATIONARY — differencing required'
+            ),
+            'correction': 'No correction needed' if is_stationary else 'Apply first differencing (d=1)'
+        }
+
+    except Exception as e:
+        return {'test': 'ADF', 'series_name': name, 'error': str(e), 'is_violated': False}
+
+
+def check_kpss(series, name='series'):
+    """
+    KPSS test for stationarity (null: series IS stationary).
+
+    Complements ADF: ADF null is unit root; KPSS null is stationarity.
+    Only runs when statsmodels is available.
+    """
+    if not STATSMODELS_AVAILABLE:
+        return {
+            'test': 'KPSS',
+            'series_name': name,
+            'is_violated': False,
+            'interpretation': 'KPSS not available (install statsmodels)',
+            'correction': 'No correction needed'
+        }
+    try:
+        s = pd.Series(series).dropna()
+        if len(s) < 5:
+            return {
+                'test': 'KPSS', 'series_name': name, 'is_violated': False,
+                'interpretation': 'Insufficient data for KPSS'
+            }
+        stat, pval, _, _ = kpss(s, regression='c', nlags='auto')
+        # pval < 0.05 → reject stationarity
+        is_nonstationary = pval < 0.05
+        return {
+            'test': 'KPSS',
+            'series_name': name,
+            'test_statistic': float(stat),
+            'p_value': float(pval),
+            'is_violated': is_nonstationary,
+            'interpretation': (
+                f"KPSS: NON-STATIONARY (p={pval:.4f})" if is_nonstationary
+                else f"KPSS: STATIONARY (p={pval:.4f})"
+            ),
+            'correction': 'Apply differencing' if is_nonstationary else 'No correction needed'
         }
     except Exception as e:
-        return {'test': 'ADF', 'series_name': name, 'error': str(e)}
+        return {'test': 'KPSS', 'series_name': name, 'error': str(e), 'is_violated': False}
+
+
+def check_ljung_box(residuals, lags=10):
+    """
+    Ljung-Box portmanteau test for residual autocorrelation.
+
+    Preferred over Durbin-Watson for ARIMA residual checking.
+    Falls back to Durbin-Watson if statsmodels unavailable.
+    """
+    r = np.asarray(residuals)[~np.isnan(residuals)]
+    if len(r) < lags + 2:
+        return {
+            'test': 'Ljung-Box',
+            'is_violated': False,
+            'interpretation': f'Insufficient data for Ljung-Box (need > {lags + 1} obs)'
+        }
+
+    if STATSMODELS_AVAILABLE:
+        try:
+            lb = acorr_ljungbox(r, lags=[lags], return_df=True)
+            stat = float(lb['lb_stat'].iloc[0])
+            pval = float(lb['lb_pvalue'].iloc[0])
+            is_violated = pval < 0.05
+            return {
+                'test': f'Ljung-Box (lag={lags})',
+                'test_statistic': stat,
+                'p_value': pval,
+                'is_violated': is_violated,
+                'interpretation': (
+                    f"Residual autocorrelation detected (LB p={pval:.4f})" if is_violated
+                    else f"No significant residual autocorrelation (LB p={pval:.4f})"
+                ),
+                'correction': 'Increase ARIMA order (more AR/MA terms)' if is_violated else 'No correction needed'
+            }
+        except Exception as e:
+            pass  # fall through to DW
+
+    return check_autocorrelation(r)
 
 
 def check_autocorrelation(residuals):
     """Durbin-Watson test for first-order autocorrelation."""
     try:
-        residuals_clean = residuals[~np.isnan(residuals)]
-        
-        if len(residuals_clean) < 3:
+        r = np.asarray(residuals)[~np.isnan(residuals)]
+        if len(r) < 3:
             return {
-                'test': 'Durbin-Watson',
-                'dw_statistic': np.nan,
-                'interpretation': 'Insufficient data',
-                'correction': 'Need at least 3 observations'
+                'test': 'Durbin-Watson', 'is_violated': False,
+                'interpretation': 'Insufficient data'
             }
-        
-        # DW = Σ(e_t - e_{t-1})² / Σ(e_t)²
-        diffs = np.diff(residuals_clean)
-        dw = np.sum(diffs ** 2) / np.sum(residuals_clean ** 2)
-        
-        # DW ranges from 0-4: 2 = no autocorr, <2 = positive, >2 = negative
+        dw = float(np.sum(np.diff(r) ** 2) / np.sum(r ** 2))
         has_autocorr = abs(dw - 2) > 0.5
-        
         return {
             'test': 'Durbin-Watson',
             'dw_statistic': dw,
             'is_violated': has_autocorr,
-            'interpretation': f"Autocorrelation detected (DW={dw:.3f})" if has_autocorr else f"No significant autocorrelation (DW={dw:.3f})",
-            'correction': 'Consider ARIMA or robust errors' if has_autocorr else 'No correction needed'
+            'interpretation': (
+                f"Autocorrelation detected (DW={dw:.3f})" if has_autocorr
+                else f"No significant autocorrelation (DW={dw:.3f})"
+            ),
+            'correction': 'Consider ARIMA or robust standard errors' if has_autocorr else 'No correction needed'
         }
     except Exception as e:
-        return {'test': 'Durbin-Watson', 'error': str(e)}
+        return {'test': 'Durbin-Watson', 'error': str(e), 'is_violated': False}
+
+
+def check_heteroscedasticity(residuals, y_fitted):
+    """Breusch-Pagan test for heteroscedasticity."""
+    try:
+        r = np.asarray(residuals)
+        yf = np.asarray(y_fitted)
+        n = len(r)
+        u2 = r ** 2
+        u_bar = np.mean(u2)
+        yf_c = yf - np.mean(yf)
+        ss_y = np.sum(yf_c ** 2)
+        ss_u = np.sum((u2 - u_bar) ** 2)
+
+        if ss_y < 1e-15:
+            return {
+                'test': 'Breusch-Pagan', 'is_violated': False,
+                'interpretation': 'Unable to compute (zero variance in fitted values)'
+            }
+
+        lm = (ss_u / ss_y) * (n / 2)
+        pval = float(1 - stats.chi2.cdf(lm, df=1))
+        is_hetero = pval < 0.05
+
+        return {
+            'test': 'Breusch-Pagan',
+            'statistic': float(lm),
+            'p_value': pval,
+            'is_violated': is_hetero,
+            'interpretation': (
+                f"Heteroscedasticity detected (p={pval:.4f})" if is_hetero
+                else f"Homoscedastic (p={pval:.4f})"
+            ),
+            'correction': 'Robust (HC1) standard errors applied' if is_hetero else 'No correction needed'
+        }
+    except Exception as e:
+        return {'test': 'Breusch-Pagan', 'error': str(e), 'is_violated': False}
 
 
 def check_normality_of_residuals(residuals):
     """Shapiro-Wilk test for normality of residuals."""
     try:
-        residuals_clean = residuals[~np.isnan(residuals)]
-        
-        if len(residuals_clean) < 3:
+        r = np.asarray(residuals)[~np.isnan(residuals)]
+        if len(r) < 3:
             return {
-                'test': 'Shapiro-Wilk',
-                'interpretation': 'Insufficient data',
-                'correction': 'Need at least 3 observations'
+                'test': 'Shapiro-Wilk', 'is_violated': False,
+                'interpretation': 'Insufficient data'
             }
-        
-        # Shapiro-Wilk test
-        if len(residuals_clean) <= 5000:
-            stat, p_value = stats.shapiro(residuals_clean)
-        else:
-            # For large samples, use a subset
-            stat, p_value = stats.shapiro(residuals_clean[:5000])
-        
-        is_normal = p_value > 0.05
-        
+        sample = r[:5000]
+        stat, pval = stats.shapiro(sample)
+        is_nonnormal = pval < 0.05
         return {
             'test': 'Shapiro-Wilk',
-            'statistic': stat,
-            'p_value': p_value,
-            'is_violated': not is_normal,
-            'interpretation': f"Non-normal residuals (p={p_value:.4f})" if not is_normal else f"Normal residuals (p={p_value:.4f})",
-            'correction': 'Consider robust standard errors or transformation' if not is_normal else 'No correction needed'
+            'statistic': float(stat),
+            'p_value': float(pval),
+            'is_violated': is_nonnormal,
+            'interpretation': (
+                f"Non-normal residuals (p={pval:.4f})" if is_nonnormal
+                else f"Residuals consistent with normality (p={pval:.4f})"
+            ),
+            'correction': 'Consider robust SEs or bootstrap CIs' if is_nonnormal else 'No correction needed'
         }
     except Exception as e:
-        return {'test': 'Shapiro-Wilk', 'error': str(e)}
+        return {'test': 'Shapiro-Wilk', 'error': str(e), 'is_violated': False}
 
 
-def run_did_diagnostics(data, outcome_col, treatment_col, time_col, unit_col):
-    """Run all diagnostics for Difference-in-Differences model."""
-    
+def check_multicollinearity(X):
+    """VIF (Variance Inflation Factor) for multicollinearity."""
+    try:
+        if X.shape[1] < 2:
+            return {
+                'test': 'VIF', 'vif_values': [], 'is_violated': False,
+                'interpretation': 'Single regressor — no multicollinearity possible',
+                'correction': 'No correction needed'
+            }
+        vif_values = []
+        for i in range(X.shape[1]):
+            X_rest = np.delete(X, i, axis=1)
+            y_col = X[:, i]
+            coeffs = np.linalg.lstsq(X_rest, y_col, rcond=None)[0]
+            y_pred = X_rest @ coeffs
+            ss_res = np.sum((y_col - y_pred) ** 2)
+            ss_tot = np.sum((y_col - np.mean(y_col)) ** 2)
+            r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+            vif_values.append(1 / (1 - r2) if r2 < 1 else np.inf)
+
+        max_vif = float(np.nanmax(vif_values))
+        is_violated = max_vif > 10
+        return {
+            'test': 'VIF',
+            'vif_values': [float(v) for v in vif_values],
+            'max_vif': max_vif,
+            'is_violated': is_violated,
+            'interpretation': (
+                f"High multicollinearity (max VIF={max_vif:.1f})" if is_violated
+                else f"Acceptable multicollinearity (max VIF={max_vif:.1f})"
+            ),
+            'correction': 'Consider dropping collinear variables' if is_violated else 'No correction needed'
+        }
+    except Exception as e:
+        return {'test': 'VIF', 'error': str(e), 'is_violated': False}
+
+
+def check_parallel_trends(data, outcome_col, treatment_col, time_col, unit_col):
+    """
+    Regression-based parallel pre-trends test for DiD.
+
+    Method:
+      1. Identify "treated" units: units that ever had treatment > 0.
+      2. Identify the first period where any treated unit has treatment > 0.
+      3. Restrict to pre-treatment observations.
+      4. Regress outcome on: time_trend, treated_group, time×treated_group.
+      5. Test H0: the interaction coefficient = 0 (parallel slopes).
+
+    A significant interaction (p < 0.10) suggests differing pre-trends,
+    which undermines the DiD identifying assumption.
+    """
+    try:
+        df = data[[unit_col, time_col, outcome_col, treatment_col]].copy().dropna()
+        for col in [outcome_col, treatment_col, time_col]:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna()
+
+        # Identify treated units
+        unit_max_tx = df.groupby(unit_col)[treatment_col].max()
+        treated_units = set(unit_max_tx[unit_max_tx > 0].index)
+
+        if not treated_units:
+            return {
+                'test': 'Parallel Trends',
+                'is_violated': False,
+                'interpretation': 'No treated units identified for parallel trends test',
+                'correction': 'No correction needed'
+            }
+
+        df['_treated_group'] = df[unit_col].isin(treated_units).astype(float)
+
+        # Find first treatment period
+        treated_df = df[df['_treated_group'] == 1]
+        first_tx_period = treated_df[treated_df[treatment_col] > 0][time_col].min()
+
+        if pd.isna(first_tx_period):
+            return {
+                'test': 'Parallel Trends', 'is_violated': False,
+                'interpretation': 'Could not determine first treatment period',
+                'correction': 'No correction needed'
+            }
+
+        pre_df = df[df[time_col] < first_tx_period].copy()
+        n_pre_periods = pre_df[time_col].nunique()
+
+        if len(pre_df) < 10 or n_pre_periods < 2:
+            return {
+                'test': 'Parallel Trends', 'is_violated': False,
+                'interpretation': (
+                    f'Too few pre-treatment observations ({len(pre_df)}) '
+                    f'to test parallel trends (need >= 10 with >= 2 periods)'
+                ),
+                'correction': 'No correction needed',
+                'n_pre_periods': n_pre_periods
+            }
+
+        pre_df['_t'] = pre_df[time_col] - pre_df[time_col].min()
+        pre_df['_interact'] = pre_df['_treated_group'] * pre_df['_t']
+
+        y = pre_df[outcome_col].values
+        X = np.column_stack([
+            np.ones(len(pre_df)),
+            pre_df['_t'].values,
+            pre_df['_treated_group'].values,
+            pre_df['_interact'].values
+        ])
+        n, k = X.shape
+
+        try:
+            beta = np.linalg.lstsq(X, y, rcond=None)[0]
+            residuals = y - X @ beta
+            mse = np.sum(residuals ** 2) / max(n - k, 1)
+            vcov = mse * np.linalg.pinv(X.T @ X)
+            se = np.sqrt(np.clip(np.diag(vcov), 0, None))
+
+            interact_coef = float(beta[3])
+            interact_se = float(se[3])
+            t_stat = interact_coef / interact_se if interact_se > 0 else 0.0
+            pval = float(2 * (1 - stats.t.cdf(abs(t_stat), df=n - k)))
+
+            is_violated = pval < 0.10  # 10% threshold (standard in lit)
+            return {
+                'test': 'Parallel Trends (pre-trend regression)',
+                'interaction_coef': interact_coef,
+                'interaction_se': interact_se,
+                'p_value': pval,
+                'is_violated': is_violated,
+                'first_treatment_period': float(first_tx_period),
+                'n_pre_periods': n_pre_periods,
+                'interpretation': (
+                    f"Pre-trends VIOLATED (interact p={pval:.3f}<0.10): "
+                    f"treated and control groups had different trends before treatment"
+                    if is_violated else
+                    f"Parallel trends plausible (interact p={pval:.3f}>=0.10)"
+                ),
+                'correction': (
+                    'Interpret DiD with caution; consider synthetic control or matching'
+                    if is_violated else 'No correction needed'
+                )
+            }
+        except np.linalg.LinAlgError:
+            return {
+                'test': 'Parallel Trends', 'is_violated': False,
+                'interpretation': 'Could not compute parallel trends test (singular matrix)',
+                'correction': 'No correction needed'
+            }
+
+    except Exception as e:
+        return {'test': 'Parallel Trends', 'error': str(e), 'is_violated': False}
+
+
+# ---------------------------------------------------------------------------
+# Composite diagnostic runners
+# ---------------------------------------------------------------------------
+
+def run_arima_diagnostics(data, outcome_col, time_col):
+    """Full diagnostics for ARIMA: stationarity (ADF + KPSS), Ljung-Box, normality."""
     diagnostics = {
-        'model': 'Difference-in-Differences',
+        'model': 'ARIMA',
         'checks': [],
         'violations': [],
         'corrections': []
     }
-    
+
     try:
-        # Prepare data
-        data_clean = data[[outcome_col, treatment_col, time_col, unit_col]].dropna()
-        
-        if len(data_clean) < 10:
-            diagnostics['error'] = 'Insufficient data for DiD diagnostics'
+        series = data[outcome_col].dropna()
+        if len(series) < 5:
+            diagnostics['error'] = 'Insufficient data for ARIMA diagnostics (need >= 5 obs)'
             return diagnostics
-        
-        # Extract variables
-        y = data_clean[outcome_col].values
-        X_treatment = data_clean[treatment_col].values
-        X_time = pd.factorize(data_clean[time_col])[0]
-        X_unit = pd.factorize(data_clean[unit_col])[0]
-        
-        # Check 1: Heteroscedasticity (with simple residuals)
-        X_did = np.vstack([np.ones(len(y)), X_treatment, X_time, X_unit]).T
-        try:
-            coeffs = np.linalg.lstsq(X_did, y, rcond=None)[0]
-            residuals = y - X_did @ coeffs
-            y_fitted = X_did @ coeffs
-            hetero_check = check_heteroscedasticity(residuals, y_fitted)
-            diagnostics['checks'].append(hetero_check)
-            if hetero_check.get('is_violated'):
-                diagnostics['violations'].append(hetero_check['test'])
-                diagnostics['corrections'].append(hetero_check.get('correction', 'Use robust SE'))
-        except Exception as e:
-            diagnostics['checks'].append({'test': 'Heteroscedasticity', 'error': str(e)})
-        
-        # Check 2: Multicollinearity
-        multi_check = check_multicollinearity(X_did[:, 1:])  # Exclude intercept
-        diagnostics['checks'].append(multi_check)
-        if multi_check.get('is_violated'):
-            diagnostics['violations'].append(multi_check['test'])
-            diagnostics['corrections'].append(multi_check.get('correction'))
-        
-        # Check 3: Autocorrelation in residuals
-        if 'residuals' in locals():
-            auto_check = check_autocorrelation(residuals)
-            diagnostics['checks'].append(auto_check)
-            if auto_check.get('is_violated'):
-                diagnostics['violations'].append(auto_check['test'])
-                diagnostics['corrections'].append(auto_check.get('correction'))
-        
-        # Check 4: Normality of residuals
-        if 'residuals' in locals():
-            norm_check = check_normality_of_residuals(residuals)
-            diagnostics['checks'].append(norm_check)
-            if norm_check.get('is_violated'):
-                diagnostics['violations'].append(norm_check['test'])
-                diagnostics['corrections'].append(norm_check.get('correction'))
-        
+
+        # 1. ADF stationarity
+        adf = check_stationarity(series, name=outcome_col)
+        diagnostics['checks'].append(adf)
+        if adf.get('is_violated'):
+            diagnostics['violations'].append(adf['test'])
+            diagnostics['corrections'].append(adf.get('correction', 'Apply differencing'))
+
+            # Also test first differences
+            diff_series = series.diff().dropna()
+            adf_diff = check_stationarity(diff_series, name=f'{outcome_col} (1st diff)')
+            diagnostics['checks'].append(adf_diff)
+
+        # 2. KPSS
+        kpss_result = check_kpss(series, name=outcome_col)
+        diagnostics['checks'].append(kpss_result)
+        if kpss_result.get('is_violated'):
+            diagnostics['violations'].append(kpss_result['test'])
+            diagnostics['corrections'].append(kpss_result.get('correction', 'Apply differencing'))
+
+        # 3. Ljung-Box on AR(1) residuals (proxy for ARIMA residuals pre-fit)
+        y = series.values
+        if len(y) >= 4:
+            X = np.column_stack([np.ones(len(y) - 1), y[:-1]])
+            beta = np.linalg.lstsq(X, y[1:], rcond=None)[0]
+            residuals = y[1:] - X @ beta
+            lb = check_ljung_box(residuals)
+            diagnostics['checks'].append(lb)
+            if lb.get('is_violated'):
+                diagnostics['violations'].append(lb['test'])
+                diagnostics['corrections'].append(lb.get('correction', 'Increase ARIMA order'))
+
+            # 4. Normality of residuals
+            norm = check_normality_of_residuals(residuals)
+            diagnostics['checks'].append(norm)
+            if norm.get('is_violated'):
+                diagnostics['violations'].append(norm['test'])
+                diagnostics['corrections'].append(norm.get('correction', 'Use robust CIs'))
+
     except Exception as e:
         diagnostics['error'] = str(e)
-    
+
     return diagnostics
 
 
-def run_arima_diagnostics(data, outcome_col, time_col):
-    """Run all diagnostics for ARIMA model."""
-    
+def run_did_diagnostics(data, outcome_col, treatment_col, time_col, unit_col):
+    """Full diagnostics for DiD: parallel trends, heteroscedasticity, autocorrelation, normality."""
     diagnostics = {
-        'model': 'ARIMA (AR(1))',
+        'model': 'Difference-in-Differences (TWFE)',
         'checks': [],
         'violations': [],
         'corrections': []
     }
-    
+
     try:
-        # Prepare data
-        series = data[outcome_col].dropna().sort_values().reset_index(drop=True)
-        
-        if len(series) < 5:
-            diagnostics['error'] = 'Insufficient data for ARIMA diagnostics'
+        df = data[[outcome_col, treatment_col, time_col, unit_col]].dropna()
+        if len(df) < 10:
+            diagnostics['error'] = 'Insufficient data for DiD diagnostics'
             return diagnostics
-        
-        # Check 1: Stationarity
-        stat_check = check_stationarity(series, name=outcome_col)
-        diagnostics['checks'].append(stat_check)
-        
-        if stat_check.get('is_stationary') == False:
-            diagnostics['violations'].append(stat_check['test'])
-            diagnostics['corrections'].append(stat_check.get('correction', 'Apply first differencing'))
-            
-            # If non-stationary, check first differences
-            diff_series = series.diff().dropna()
-            stat_check_diff = check_stationarity(diff_series, name=f"{outcome_col} (1st diff)")
-            diagnostics['checks'].append(stat_check_diff)
-        
-        # Check 2: Autocorrelation structure (on residuals from AR(1) fit)
+
+        for col in [outcome_col, treatment_col, time_col]:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna()
+
+        # 1. Parallel trends (most important DiD assumption)
+        pt = check_parallel_trends(df, outcome_col, treatment_col, time_col, unit_col)
+        diagnostics['checks'].append(pt)
+        if pt.get('is_violated'):
+            diagnostics['violations'].append(pt['test'])
+            diagnostics['corrections'].append(pt.get('correction', 'Interpret with caution'))
+
+        # Simple OLS residuals for other checks (fast approximation)
+        y = df[outcome_col].values
+        X_t = pd.factorize(df[time_col])[0]
+        X_u = pd.factorize(df[unit_col])[0]
+        X_tx = df[treatment_col].values
+        X_mat = np.column_stack([np.ones(len(y)), X_tx, X_t, X_u])
         try:
-            y = series.values
-            y_lag = y[:-1]
-            dy = np.diff(y)
-            
-            X = np.vstack([np.ones(len(y_lag)), y_lag]).T
-            coeffs = np.linalg.lstsq(X, dy, rcond=None)[0]
-            residuals = dy - X @ coeffs
-            
-            auto_check = check_autocorrelation(residuals)
-            diagnostics['checks'].append(auto_check)
-            if auto_check.get('is_violated'):
-                diagnostics['violations'].append(auto_check['test'])
-                diagnostics['corrections'].append(auto_check.get('correction'))
-        except:
+            coeffs = np.linalg.lstsq(X_mat, y, rcond=None)[0]
+            residuals = y - X_mat @ coeffs
+            y_fitted = X_mat @ coeffs
+
+            # 2. Heteroscedasticity
+            hetero = check_heteroscedasticity(residuals, y_fitted)
+            diagnostics['checks'].append(hetero)
+            if hetero.get('is_violated'):
+                diagnostics['violations'].append(hetero['test'])
+                diagnostics['corrections'].append(hetero.get('correction', 'Clustered SEs applied'))
+
+            # 3. Autocorrelation (DW)
+            auto = check_autocorrelation(residuals)
+            diagnostics['checks'].append(auto)
+            if auto.get('is_violated'):
+                diagnostics['violations'].append(auto['test'])
+                diagnostics['corrections'].append(auto.get('correction', 'Use clustered SEs'))
+
+            # 4. Normality
+            norm = check_normality_of_residuals(residuals)
+            diagnostics['checks'].append(norm)
+            if norm.get('is_violated'):
+                diagnostics['violations'].append(norm['test'])
+                diagnostics['corrections'].append(norm.get('correction', 'Use robust SEs'))
+
+        except Exception:
             pass
-        
-        # Check 3: Normality of residuals
-        if 'residuals' in locals():
-            norm_check = check_normality_of_residuals(residuals)
-            diagnostics['checks'].append(norm_check)
-            if norm_check.get('is_violated'):
-                diagnostics['violations'].append(norm_check['test'])
-                diagnostics['corrections'].append(norm_check.get('correction'))
-    
+
     except Exception as e:
         diagnostics['error'] = str(e)
-    
+
+    return diagnostics
+
+
+def run_ols_diagnostics(data, outcome_col, treatment_col):
+    """Diagnostics for cross-sectional OLS: heteroscedasticity, normality."""
+    diagnostics = {
+        'model': 'OLS',
+        'checks': [],
+        'violations': [],
+        'corrections': []
+    }
+    try:
+        df = data[[outcome_col, treatment_col]].dropna()
+        for col in [outcome_col, treatment_col]:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna()
+
+        if len(df) < 5:
+            diagnostics['error'] = 'Insufficient data for OLS diagnostics'
+            return diagnostics
+
+        y = df[outcome_col].values
+        X = np.column_stack([np.ones(len(df)), df[treatment_col].values])
+        coeffs = np.linalg.lstsq(X, y, rcond=None)[0]
+        residuals = y - X @ coeffs
+        y_fitted = X @ coeffs
+
+        hetero = check_heteroscedasticity(residuals, y_fitted)
+        diagnostics['checks'].append(hetero)
+        if hetero.get('is_violated'):
+            diagnostics['violations'].append(hetero['test'])
+            diagnostics['corrections'].append('HC1 robust standard errors applied')
+
+        norm = check_normality_of_residuals(residuals)
+        diagnostics['checks'].append(norm)
+        if norm.get('is_violated'):
+            diagnostics['violations'].append(norm['test'])
+            diagnostics['corrections'].append(norm.get('correction', 'Use robust CIs'))
+
+    except Exception as e:
+        diagnostics['error'] = str(e)
+
     return diagnostics

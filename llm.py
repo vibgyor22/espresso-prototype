@@ -1,75 +1,86 @@
+"""
+LLM interface for Espresso (Gemini).
+
+Responsibilities:
+  - parse_question    : NL question → structured intent JSON
+  - map_columns       : intent + column samples → column mapping
+  - identify_unit_value : fuzzy-match a unit description to a data value
+  - query_gemini      : generic text generation for interpretation
+"""
+
 import json
 import google.genai as genai
 import os
-from dotenv import load_dotenv
-import ssl
 import time
 import random
+from dotenv import load_dotenv
 
-# Load the API key from .env file
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 
-# Initialize client with SSL verification handling
 try:
-    # Set a reasonable timeout (60 seconds for API calls)
-    import socket
-    socket.setdefaulttimeout(60)
     client = genai.Client(api_key=api_key)
-    print("[LLM] Gemini client initialized successfully")
+    print("[LLM] Gemini client initialized")
 except Exception as e:
-    print(f"Warning: Client initialization issue: {e}")
-    print("Retrying with lenient SSL context...")
-    try:
-        # Create lenient SSL context
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        socket.setdefaulttimeout(60)
-        client = genai.Client(api_key=api_key)
-        print("[LLM] Gemini client initialized with lenient SSL")
-    except Exception as e2:
-        print(f"Error: Could not initialize Gemini client: {e2}")
-        client = None
+    print(f"[LLM] Warning: could not initialize Gemini client: {e}")
+    client = None
 
-# This is the instruction we give to Gemini
-SYSTEM_PROMPT = """You are a JSON extractor. Extract analytical intent from questions and output ONLY valid JSON.
 
-Instructions:
-- Extract: question_type (causal_effect or forecast), outcome, treatment, time, unit, unit_value, forecast_periods
-- Look for time-related words: year, month, date, period, time, when, temporal
-- Look for unit/group words: country, region, state, entity, group, unit, subject
-- Extract "unit" as the TYPE (e.g., "country", "region", "company")
-- Extract "unit_value" as the SPECIFIC entity (e.g., "India", "Finland", "United States") OR description (e.g., "most happy country in europe", "largest economy")
-- For forecast questions: extract the NUMBER of periods to forecast (e.g., "next 10 years" -> forecast_periods: 10)
-- If forecast_periods not specified, use 10 as default
-- If not explicitly mentioned, infer from context
-- Use null ONLY if truly impossible to extract
+# ---------------------------------------------------------------------------
+# System prompts
+# ---------------------------------------------------------------------------
 
-Example 1: "What is the effect of interest rates on unemployment?"
-{"question_type": "causal_effect", "outcome": "unemployment", "treatment": "interest_rate", "time": "year", "unit": "country", "unit_value": null, "forecast_periods": null}
+PARSE_PROMPT = """You are a JSON extractor. Extract analytical intent from research questions.
+Output ONLY valid JSON — no prose, no markdown fences.
 
-Example 2: "What is the forecast of unemployment for India for the next 10 years?"
-{"question_type": "forecast", "outcome": "unemployment", "treatment": null, "time": "year", "unit": "country", "unit_value": "India", "forecast_periods": 10}
+Fields to extract:
+  question_type  : "causal_effect" | "forecast" | "association"
+  outcome        : the dependent variable (string or null)
+  treatment      : the independent/treatment variable (string or null)
+  time           : the time dimension label (string or null)
+  unit           : type of entity (e.g. "country", "firm", "state") or null
+  unit_value     : specific entity name OR descriptive phrase (e.g. "India", "most populous country") or null
+  forecast_periods : integer number of periods to forecast, or null
+  pre_period     : cutoff year/period before which is "pre-treatment" (integer or null)
 
-Example 3: "forecast gdp for the most happy country in europe next 5 years"
-{"question_type": "forecast", "outcome": "gdp", "treatment": null, "time": "year", "unit": "country", "unit_value": "most happy country in europe", "forecast_periods": 5}
+Guidelines:
+  - "causal_effect" → effect of X on Y (use words: effect, impact, cause, affect)
+  - "association"   → relationship/correlation between X and Y (no causal language)
+  - "forecast"      → prediction of future values (use words: forecast, predict, project)
+  - forecast_periods: default 10 if not specified for forecast questions
+  - pre_period: extract ONLY if the question mentions a specific year/cutoff (e.g. "policy implemented in 2010")
+  - unit_value: extract EVEN IF it is a descriptive phrase; the system will resolve it to an actual entity
 
-Example 4: "How will sales change next quarter?"
-{"question_type": "forecast", "outcome": "sales", "treatment": null, "time": "quarter", "unit": null, "unit_value": null, "forecast_periods": 1}
+Examples:
 
-Output JSON only, no other text:"""
+"What is the effect of minimum wage on employment?"
+{"question_type":"causal_effect","outcome":"employment","treatment":"minimum_wage","time":"year","unit":"state","unit_value":null,"forecast_periods":null,"pre_period":null}
 
+"What is the relationship between inflation and GDP growth?"
+{"question_type":"association","outcome":"gdp_growth","treatment":"inflation","time":"year","unit":"country","unit_value":null,"forecast_periods":null,"pre_period":null}
+
+"Forecast unemployment in India for the next 10 years"
+{"question_type":"forecast","outcome":"unemployment","treatment":null,"time":"year","unit":"country","unit_value":"India","forecast_periods":10,"pre_period":null}
+
+"What was the effect of the 2008 crisis (starting 2008) on bank lending?"
+{"question_type":"causal_effect","outcome":"bank_lending","treatment":"crisis","time":"year","unit":"country","unit_value":null,"forecast_periods":null,"pre_period":2007}
+
+"How will GDP change in the most innovative country in Europe over 5 years?"
+{"question_type":"forecast","outcome":"gdp","treatment":null,"time":"year","unit":"country","unit_value":"most innovative country in europe","forecast_periods":5,"pre_period":null}
+
+Output JSON only:"""
+
+
+# ---------------------------------------------------------------------------
+# Shared retry helper
+# ---------------------------------------------------------------------------
 
 def _generate_with_retry(model, contents, config=None, max_retries=5):
-    """
-    Call Gemini with retry/backoff to handle 429s and transient failures.
-    """
+    """Exponential backoff retry for transient Gemini errors (429, timeouts)."""
     if not client:
         raise RuntimeError("Gemini client not initialized")
 
-    base_delay = 2.0
-    max_delay = 30.0
+    base_delay, max_delay = 2.0, 30.0
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -80,287 +91,208 @@ def _generate_with_retry(model, contents, config=None, max_retries=5):
             )
         except Exception as e:
             msg = str(e).lower()
-            is_rate_limit = "429" in msg or "rate" in msg or "resource_exhausted" in msg or "too many requests" in msg
-            is_transient = is_rate_limit or "timeout" in msg or "temporarily" in msg or "unavailable" in msg
-
+            is_transient = any(kw in msg for kw in [
+                '429', 'rate', 'resource_exhausted', 'too many requests',
+                'timeout', 'temporarily', 'unavailable'
+            ])
             if attempt == max_retries or not is_transient:
                 raise
-
             delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
-            jitter = random.uniform(0, 0.5)
-            sleep_for = delay + jitter
-            print(f"[LLM] Transient error (attempt {attempt}/{max_retries}). Retrying in {sleep_for:.1f}s...")
+            sleep_for = delay + random.uniform(0, 0.5)
+            print(f"[LLM] Transient error (attempt {attempt}/{max_retries}). "
+                  f"Retrying in {sleep_for:.1f}s…")
             time.sleep(sleep_for)
+
+
+def _extract_json(text):
+    """Extract the first {...} block from a string."""
+    if '{' in text:
+        start = text.index('{')
+        end = text.rindex('}') + 1
+        return text[start:end]
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def parse_question(text):
     """
-    This function sends your question to Gemini and gets back
-    a structured understanding of what you're asking
+    Parse a natural-language research question into a structured intent dict.
+
+    Returns a dict with keys: question_type, outcome, treatment, time, unit,
+    unit_value, forecast_periods, pre_period — or None on failure.
     """
     if not client:
         print("[ERROR] Gemini client not initialized")
         return None
-        
     try:
-        print(f"[LLM] Parsing question: {text[:50]}...")
-        response = _generate_with_retry(
+        print(f"[LLM] Parsing question: {text[:60]}…")
+        resp = _generate_with_retry(
             model="gemini-2.5-flash",
-            contents=f"{SYSTEM_PROMPT}\n\nQuestion: {text}\n\nRespond with JSON only:",
-            config={
-                "temperature": 0.2,
-                "top_p": 0.9,
-                "top_k": 40
-            }
+            contents=f"{PARSE_PROMPT}\n\nQuestion: {text}\n\nJSON:",
+            config={"temperature": 0.1, "top_p": 0.9, "top_k": 40}
         )
-        
-        content = response.text.strip()
-        print(f"[LLM] Raw response: {content[:100]}...")
-        
-        # Try to extract JSON if there's extra text
-        if "{" in content:
-            start = content.index("{")
-            end = content.rindex("}") + 1
-            content = content[start:end]
-        
-        result = json.loads(content)
-        print(f"[LLM] Parsed intent: {result}")
+        raw = _extract_json(resp.text.strip())
+        result = json.loads(raw)
+        print(f"[LLM] Intent: {result}")
         return result
     except Exception as e:
-        print(f"[ERROR] Error calling Gemini for parse_question: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[ERROR] parse_question failed: {e}")
         return None
 
 
 def map_columns(intent, column_samples):
     """
-    Given an `intent` (from parse_question) and a dict of `column_samples`
-    (as returned by `get_column_samples`), ask Gemini to map the logical fields
-    (outcome, treatment, time, unit) to the actual column names in the dataset.
+    Map intent fields to actual dataset column names.
 
-    `column_samples` should be a dict: {column_name: [sample_value_strs...]}
+    `column_samples` : {column_name: [sample_value_str, ...]}
 
-    Returns a dict mapping each field to a column name or null.
-    Example: {"outcome": "unemployment", "treatment": "interest_rate", "time": "year", "unit": "country"}
+    Returns a mapping dict (see prompt schema below).
     """
     if not client:
-        print("[ERROR] Gemini client not initialized")
         return {"outcome": None, "treatment": None, "time": None, "unit": None}
-        
     try:
-        print(f"[LLM] Mapping columns for intent: {intent}")
-        
-        # Build a concise description of columns and a few sample values
-        cols_text_lines = []
-        for col, samples in column_samples.items():
-            sample_preview = ", ".join(samples[:5]) if samples else ""
-            cols_text_lines.append(f"- {col}: {sample_preview}")
-        cols_text = "\n".join(cols_text_lines)
-
-        # Ask the LLM to decide whether the dataset is 'indicator-style' (one row per series and year columns)
-        # or a regular column-per-variable table, and to return a single mapping that includes
-        # whether to pivot and how to identify variables.
-        # The LLM should return JSON with this schema (only JSON):
-        # {
-        #   "outcome": {"type":"column"|"indicator","value":"<column name or indicator value>"},
-        #   "treatment": {"type":"column"|"indicator","value":"<column name or indicator value>"},
-        #   "time": {"type":"column","value":"<column name>"} OR {"type":"years","value":["1980","1981"]},
-        #   "unit": {"type":"column","value":"<column name>"},
-        #   "pivot": true|false,
-        #   "indicator_column": "<column name>" or null,
-        #   "year_columns": ["1980","1981",...] or null,
-        #   "notes": "brief explanation"
-        # }
+        print(f"[LLM] Mapping columns…")
+        cols_text = "\n".join(
+            f"- {col}: {', '.join(samples[:5])}"
+            for col, samples in column_samples.items()
+        )
 
         prompt = (
-            "You are given a dataset's column names and sample values. Decide whether this dataset "
-            "is 'indicator-style' (one row per series with year columns) or a regular tidy table. "
-            "Return a single JSON object describing how to map the user's intent variables to the dataset.\n\n"
+            "You are given a dataset's column names and sample values. "
+            "Decide whether this dataset is 'indicator-style' (one row per series "
+            "with year columns) or a regular tidy table. "
+            "Return a single JSON object describing how to map the user's intent variables.\n\n"
             f"Columns and samples:\n{cols_text}\n\n"
             f"User intent: {json.dumps(intent)}\n\n"
-            "CRITICAL: If the dataset has an 'indicator' or 'series' column with many values, "
-            "map outcome/treatment to EXACT indicator/series values that you can see in the samples. "
-            "DO NOT invent or imagine indicator names. Only use names that appear in the column samples.\n\n"
+            "CRITICAL: If the dataset has an indicator/series column with many values, "
+            "map outcome/treatment to EXACT indicator values visible in the samples. "
+            "DO NOT invent indicator names.\n\n"
             "RESPONSE FORMAT (JSON only):\n"
             "{\n"
             "  \"outcome\": {\"type\": \"column|indicator\", \"value\": \"...\"},\n"
             "  \"treatment\": {\"type\": \"column|indicator\", \"value\": \"...\"},\n"
-            "  \"time\": {\"type\": \"column|years\", \"value\": \"<column name>\" or [list of year columns]},\n"
-            "  \"unit\": {\"type\": \"column\", \"value\": \"<column name>\"},\n"
+            "  \"time\": {\"type\": \"column|years\", \"value\": \"<col>\" or [year_list]},\n"
+            "  \"unit\": {\"type\": \"column\", \"value\": \"<col>\"},\n"
             "  \"pivot\": true|false,\n"
-            "  \"indicator_column\": \"<column name>\" or null,\n"
-            "  \"year_columns\": [list of year-like columns] or null,\n"
+            "  \"indicator_column\": \"<col>\" or null,\n"
+            "  \"year_columns\": [list] or null,\n"
             "  \"notes\": \"short explanation\"\n"
             "}\n\n"
-            "Be conservative: if you think the dataset must be pivoted to extract time series, set \"pivot\": true and return the indicator column and year columns.\n"
             "Only output valid JSON matching the schema."
         )
 
-        print("[LLM] Sending column mapping request to Gemini...")
-        response = _generate_with_retry(
+        resp = _generate_with_retry(
             model="gemini-2.5-flash",
             contents=prompt,
-            config={
-                "temperature": 0.2,
-                "top_p": 0.9,
-                "top_k": 40
-            }
+            config={"temperature": 0.1, "top_p": 0.9, "top_k": 40}
         )
-
-        content = response.text.strip()
-        print(f"[LLM] Mapping response received: {content[:100]}...")
-        
-        if "{" in content:
-            start = content.index("{")
-            end = content.rindex("}") + 1
-            content = content[start:end]
-
-        mapping = json.loads(content)
-        print(f"[LLM] Column mapping complete: {list(mapping.keys())}")
+        mapping = json.loads(_extract_json(resp.text.strip()))
+        print(f"[LLM] Column mapping: {list(mapping.keys())}")
         return mapping
     except Exception as e:
-        print(f"[ERROR] Error mapping columns with Gemini: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[ERROR] map_columns failed: {e}")
         return {"outcome": None, "treatment": None, "time": None, "unit": None}
+
 
 def identify_unit_value(unit_description, unit_column_name, df):
     """
-    Identify the specific unit value from the data based on a description.
-    
-    Args:
-        unit_description: Description or name of the unit (e.g., "India", "most happy country in europe")
-        unit_column_name: Name of the unit column in the dataframe
-        df: The dataframe containing the data
-        
-    Returns:
-        The actual unit value from the dataframe, or None if not found
+    Resolve a unit description (exact name or phrase) to a value in the data.
+
+    e.g. "most innovative country in europe" → "Switzerland"
     """
     if not client or not unit_description or not unit_column_name:
         return None
-    
     try:
-        # Get unique unit values from the dataframe
         all_units = df[unit_column_name].dropna().unique().tolist()
-        
-        # Smart sampling: if description appears to be an exact name, prioritize units with partial matches
-        potential_matches = [u for u in all_units if unit_description.lower() in str(u).lower()]
-        
-        if potential_matches:
-            # Include matches first, then fill with other units
-            unique_units = potential_matches[:50] + [u for u in all_units if u not in potential_matches][:50]
-        else:
-            # No obvious matches, use first 100
-            unique_units = all_units[:100]
-        
-        prompt = f"""You are given a list of {unit_column_name} values from a dataset.
-Your task is to identify which specific value matches the description: "{unit_description}"
 
-Available {unit_column_name} values:
-{', '.join(str(u) for u in unique_units)}
+        # Prioritise units that partially match the description
+        low_desc = unit_description.lower()
+        matches = [u for u in all_units if low_desc in str(u).lower()]
+        sample = (matches[:50] + [u for u in all_units if u not in matches][:50])
 
-Rules:
-- If the description is an exact match or close match to one of the values, return that value
-- If the description is a characteristic (e.g., "most happy country in europe"), use your knowledge to identify the best match
-- For "most happy country in europe", return "Finland" (if it exists in the list)
-- For "largest economy", return "United States" (if it exists in the list)
-- Return ONLY the exact value from the list, nothing else
-- If no match can be made, return "NOT_FOUND"
+        prompt = (
+            f"You are given a list of {unit_column_name} values from a dataset.\n"
+            f"Identify which specific value matches: \"{unit_description}\"\n\n"
+            f"Available values:\n{', '.join(str(u) for u in sample)}\n\n"
+            "Rules:\n"
+            "- Return the EXACT value from the list that best matches.\n"
+            "- Use your world knowledge for descriptive phrases "
+            "(e.g. 'most happy country in europe' → 'Finland').\n"
+            "- Return only the matched value — no explanation.\n"
+            "- If no match is possible, return NOT_FOUND.\n\n"
+            "Matched value:"
+        )
 
-Output only the matched value:"""
-        
-        print(f"[LLM] Identifying unit: '{unit_description}'...")
-        response = _generate_with_retry(
+        resp = _generate_with_retry(
             model="gemini-2.5-flash",
             contents=prompt,
-            config={
-                "temperature": 0.2,
-                "top_p": 0.9,
-                "top_k": 40
-            }
+            config={"temperature": 0.1, "top_p": 0.9, "top_k": 40}
         )
-        
-        identified_unit = response.text.strip()
-        print(f"[LLM] Identified unit: '{identified_unit}'")
-        
-        # Verify the identified unit exists in the data (check all units, not just first 100)
-        if identified_unit in all_units:
-            return identified_unit
-        elif identified_unit != "NOT_FOUND":
-            # Try case-insensitive exact match
-            for unit in all_units:
-                if str(unit).lower() == identified_unit.lower():
-                    return unit
-            
-            # Extract key country name (ignore "People's Republic of", "Kingdom of", etc.)
-            identified_lower = identified_unit.lower()
-            # Common prefixes/suffixes to ignore
-            ignore_phrases = ['people\'s republic of', 'republic of', 'kingdom of', 'special administrative region', 
-                            'the', 'province of', 'commonwealth of', 'state of']
-            
-            # Try to find main country name
-            identified_clean = identified_lower
-            for phrase in ignore_phrases:
-                identified_clean = identified_clean.replace(phrase, '').strip(' ,')
-            
-            # Now try fuzzy matching with cleaned names
-            best_match = None
-            best_score = 0
-            
-            for unit in all_units:
-                unit_lower = str(unit).lower()
-                unit_clean = unit_lower
-                for phrase in ignore_phrases:
-                    unit_clean = unit_clean.replace(phrase, '').strip(' ,')
-                
-                # Check if clean names match
-                if identified_clean and unit_clean:
-                    # Exact match on cleaned names
-                    if identified_clean == unit_clean:
-                        print(f"[LLM] Fuzzy matched '{identified_unit}' to '{unit}' (cleaned name match)")
-                        return unit
-                    
-                    # Check overlap
-                    if (identified_clean in unit_clean or unit_clean in identified_clean) and len(identified_clean) > 3:
-                        # Prefer shorter unit names (avoid administrative regions)
-                        if 'special administrative region' not in unit_lower:
-                            score = 1.0 / (1 + 0.1 * len(unit.split()))
-                            if score > best_score:
-                                best_score = score
-                                best_match = unit
-            
-            if best_match:
-                print(f"[LLM] Fuzzy matched '{identified_unit}' to '{best_match}'")
-                return best_match
-        
+        identified = resp.text.strip()
+        print(f"[LLM] Identified unit: '{identified}'")
+
+        if identified in all_units:
+            return identified
+        if identified == "NOT_FOUND":
+            return None
+
+        # Fuzzy fallback: case-insensitive + prefix stripping
+        id_low = identified.lower()
+        ignore = [
+            "people's republic of", "republic of", "kingdom of",
+            "special administrative region", "the ", "province of",
+            "commonwealth of", "state of "
+        ]
+        def strip_prefix(s):
+            for p in ignore:
+                s = s.replace(p, '').strip(' ,')
+            return s
+
+        id_clean = strip_prefix(id_low)
+        best, best_score = None, 0.0
+        for u in all_units:
+            u_clean = strip_prefix(str(u).lower())
+            if not u_clean:
+                continue
+            if id_clean == u_clean:
+                return u
+            if (id_clean in u_clean or u_clean in id_clean) and len(id_clean) > 3:
+                if 'special administrative region' not in str(u).lower():
+                    score = 1.0 / (1 + 0.1 * len(str(u).split()))
+                    if score > best_score:
+                        best_score = score
+                        best = u
+        if best:
+            print(f"[LLM] Fuzzy matched '{identified}' → '{best}'")
+            return best
         return None
+
     except Exception as e:
-        print(f"[ERROR] Error identifying unit: {e}")
+        print(f"[ERROR] identify_unit_value failed: {e}")
         return None
 
 
 def query_gemini(prompt):
     """
-    Send a prompt to Gemini and get back a text response.
-    Used for interpretation and explanation generation.
-    
-    Args:
-        prompt: String prompt to send to Gemini
-        
-    Returns:
-        String response from Gemini
+    Generic Gemini call for interpretation / explanation text.
+
+    Uses gemini-2.5-pro for higher quality prose.
     """
     try:
-        response = _generate_with_retry(
+        resp = _generate_with_retry(
             model="gemini-2.5-pro",
             contents=prompt,
-            config={
-                "temperature": 0.7,  # More natural, conversational responses
-                "top_p": 0.95,
-                "top_k": 40
-            }
+            config={"temperature": 0.7, "top_p": 0.95, "top_k": 40},
+            max_retries=1
         )
-        return response.text.strip() if response and response.text else ""
+        return resp.text.strip() if resp and resp.text else ""
     except Exception as e:
-        print(f"Error querying Gemini: {e}")
+        msg = str(e).lower()
+        if "quota" in msg or "429" in msg or "resource_exhausted" in msg:
+            print("[LLM] Interpretation quota reached; using local statistical summary.")
+        else:
+            print(f"[LLM] Interpretation unavailable; using local statistical summary ({type(e).__name__}).")
         return ""

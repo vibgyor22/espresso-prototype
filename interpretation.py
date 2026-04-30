@@ -1,216 +1,330 @@
 """
 LLM-based interpretation layer.
-Takes statistical results and feeds them back to LLM for interpretation.
+
+Takes statistical results and asks Gemini to explain them in plain English,
+answering the original research question directly.
+
+Supported model types:
+  - arima       : forecasting
+  - diff_in_diff: causal DiD
+  - panel_ols   : panel association (TWFE)
+  - ols         : cross-sectional association
 """
 
 from llm import query_gemini
 
 
-def interpret_results(question, outcome_name, treatment_name, model_type, result_dict, diagnostics_dict=None, unit_name=None, unit_description=None):
+FORECAST_MODELS = {'arima', 'linear_trend', 'exp_smoothing', 'random_walk'}
+REGRESSION_MODELS = {
+    'diff_in_diff',
+    'panel_ols',
+    'entity_fe',
+    'time_fe',
+    'first_difference',
+    'ols',
+    'pooled_ols',
+    'log_linear',
+    'log_log',
+    'polynomial_ols',
+    'median_quantile',
+}
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def interpret_results(
+    question,
+    outcome_name,
+    treatment_name,
+    model_type,
+    result_dict,
+    diagnostics_dict=None,
+    unit_name=None,
+    unit_description=None,
+):
     """
-    Use LLM to interpret statistical results and answer the original question.
-    
+    Generate a plain-English interpretation of model results.
+
     Args:
-        question: Original user question
-        outcome_name: Name of outcome variable
-        treatment_name: Name of treatment variable
-        model_type: 'diff_in_diff' or 'arima'
-        result_dict: Dictionary with model results
-        diagnostics_dict: Dictionary with diagnostic results
-        unit_name: Specific unit being analyzed (e.g., "Finland", "India")
-        unit_description: Original description if different from unit_name (e.g., "most populous country")
-    
+        question        : original user question string
+        outcome_name    : name of the dependent variable
+        treatment_name  : name of the independent / treatment variable
+        model_type      : 'arima', 'diff_in_diff', 'panel_ols', or 'ols'
+        result_dict     : dict returned by the model runner
+        diagnostics_dict: dict returned by the diagnostics runner (optional)
+        unit_name       : resolved entity name (e.g. "Finland")
+        unit_description: original user description if different (e.g. "happiest country")
+
     Returns:
-        Interpretation string (bullet point format)
+        Interpretation string (markdown-lite bullet format)
     """
-    
     try:
-        if model_type == 'diff_in_diff':
-            effect = result_dict.get('treatment_effect', 0)
-            se = result_dict.get('se', 0)
-            pval = result_dict.get('pvalue', 1)
-            r_sq = result_dict.get('r_squared', 0)
-            n_obs = result_dict.get('n_obs', 'unknown')
-            ci_lower = result_dict.get('ci_lower', effect - 1.96*se)
-            ci_upper = result_dict.get('ci_upper', effect + 1.96*se)
-            
-            significance = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else "not significant"
-            
-            diagnostics_text = ""
-            corrections_text = ""
-            if diagnostics_dict and 'violations' in diagnostics_dict:
-                violations = diagnostics_dict.get('violations', [])
-                corrections = diagnostics_dict.get('corrections', [])
-                corrections_text = ", ".join(corrections) if corrections else "All assumptions met"
-                if violations:
-                    diagnostics_text = f"\n\nDIAGNOSTIC ISSUES:\n- Violations: {', '.join(violations)}\n- Corrections applied: {corrections_text}"
-            
-            # Build unit info with description if available
-            if unit_name and unit_description and unit_description.lower() != unit_name.lower():
-                unit_info = f"\n- Unit of analysis: {unit_name} (identified as '{unit_description}')"
-            elif unit_name:
-                unit_info = f"\n- Unit of analysis: {unit_name}"
-            else:
-                unit_info = ""
-            
-            prompt = f"""Answer the question directly using statistical analysis results.
+        if model_type in FORECAST_MODELS:
+            return _interpret_arima(
+                question, outcome_name, result_dict,
+                diagnostics_dict, unit_name, unit_description
+            )
+        elif model_type in REGRESSION_MODELS:
+            return _interpret_regression(
+                question, outcome_name, treatment_name, model_type,
+                result_dict, diagnostics_dict, unit_name, unit_description
+            )
+        else:
+            return f"No interpretation available for model type '{model_type}'."
+    except Exception as e:
+        return f"Interpretation error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _unit_clause(unit_name, unit_description):
+    """Build a consistent 'for X (identified as Y)' clause."""
+    if unit_name and unit_description and unit_description.lower() != unit_name.lower():
+        return f" for {unit_name} (identified as '{unit_description}')"
+    elif unit_name:
+        return f" for {unit_name}"
+    return ""
+
+
+def _diag_text(diagnostics_dict):
+    """Summarise diagnostic violations for injection into a prompt."""
+    if not diagnostics_dict:
+        return ""
+    violations = diagnostics_dict.get('violations', [])
+    corrections = diagnostics_dict.get('corrections', [])
+    if not violations:
+        return "\nDIAGNOSTICS: All checks passed."
+    v_str = ', '.join(violations)
+    c_str = ', '.join(corrections) if corrections else 'None applied'
+    return f"\nDIAGNOSTIC ISSUES: {v_str}\nCORRECTIONS APPLIED: {c_str}"
+
+
+def _interpret_arima(question, outcome_name, result_dict, diagnostics_dict, unit_name, unit_description):
+    forecasts = result_dict.get('forecasts', [])
+    forecast_times = result_dict.get('forecast_times', [])
+    last_value = result_dict.get('last_value', 0) or 0
+    rmse = result_dict.get('rmse', 0) or 0
+    ar1_coef = result_dict.get('ar1_coef', 0) or 0
+    arima_order = result_dict.get('arima_order', (1, 0, 0))
+    engine = result_dict.get('engine', 'unknown')
+    model_label = result_dict.get('model', f'ARIMA{arima_order}')
+
+    n_periods = len(forecasts)
+    forecast_next = forecasts[0] if forecasts else 0
+    avg_forecast = sum(forecasts) / n_periods if forecasts else forecast_next
+    change = forecast_next - last_value
+    pct_change = (change / last_value * 100) if last_value else 0
+
+    ci_lower = result_dict.get('ci_lower', [])
+    ci_upper = result_dict.get('ci_upper', [])
+    ci_str = (
+        f"[{ci_lower[0]:.2f}, {ci_upper[0]:.2f}]"
+        if ci_lower and ci_upper else "not available"
+    )
+
+    unit_clause = _unit_clause(unit_name, unit_description)
+    diag = _diag_text(diagnostics_dict)
+
+    prompt = f"""Answer the forecasting question directly using the analysis results.
 
 QUESTION: "{question}"
 
-ANALYSIS RESULTS:
-- Outcome variable: {outcome_name}
-- Treatment variable: {treatment_name}{unit_info}
-- Treatment effect: {effect:,.2f}
-- Standard error: {se:,.2f}
-- P-value: {pval:.4f}
-- Statistical significance: {"Yes (p < 0.05)" if pval < 0.05 else "No (p >= 0.05)"}
-- R-squared: {r_sq:.4f} ({r_sq*100:.1f}% of variation explained)
-- Sample size: {n_obs:,} observations{diagnostics_text}
+MODEL: {model_label} (engine: {engine})
+
+FORECAST RESULTS{unit_clause}:
+- Variable: {outcome_name}
+- Last observed value: {last_value:,.4f}
+- Next-period forecast: {forecast_next:,.4f}  (95% CI: {ci_str})
+- {n_periods}-period average forecast: {avg_forecast:,.4f}
+- Expected change: {change:+,.4f} ({pct_change:+.2f}%)
+- Model fit (RMSE): {rmse:,.4f}
+- Persistence diagnostic: {ar1_coef:.3f}
+- Forecast stability: {"Stable" if abs(ar1_coef) < 0.9 else "High persistence - long-run projections are sensitive to shocks"}{diag}
 
 WRITE YOUR INTERPRETATION:
 
 1. DIRECT ANSWER (1-2 sentences):
-Answer the question directly in plain English{f' for {unit_name}' if unit_name else ''}.{f' If the question used a description like "{unit_description}", clarify that you identified this as {unit_name}.' if unit_description and unit_name and unit_description.lower() != unit_name.lower() else ''} Say whether the relationship exists, is strong/weak, positive/negative.
-
-2. WHAT THE NUMBERS MEAN (2-3 sentences):
-Explain the effect size in practical terms{f' for {unit_name}' if unit_name else ''}. Is it large or small? What does it mean in the real world?
-also mention the corrections applied and what they mean for the results.
-
-3. STATISTICAL CONFIDENCE (1-2 sentences):
-How confident are we in this result? Mention the p-value in simple terms (e.g., "we're 95% confident" or "the result could be due to chance").
-
-4. KEY TAKEAWAY (1 sentence):
-Bottom line - what should someone know about the relationship between {treatment_name} and {outcome_name}{f' in {unit_name}' if unit_name else ''}?
-
-FORMATTING RULES:
-- Start directly with your answer - NO introductory phrases like "Here is..." or "Based on..."
-- Use simple bullet points (just hyphens)
-- Write in natural, conversational language
-- Be direct and honest about what the data shows
-"""
-            
-            interpretation = query_gemini(prompt)
-            return interpretation if interpretation else "Unable to generate interpretation"
-            
-        elif model_type == 'arima':
-            # Get forecast values
-            forecasts = result_dict.get('forecasts', [])
-            forecast_times = result_dict.get('forecast_times', [])
-            forecast = forecasts[0] if forecasts else result_dict.get('forecast_next_period', 0)
-            ar_coef = result_dict.get('ar1_coef', 0)
-            last_value = result_dict.get('last_value')
-            rmse = result_dict.get('rmse', 0)
-            
-            # Handle None values safely
-            if forecast is None:
-                forecast = 0
-            if last_value is None:
-                last_value = 0
-            
-            change = forecast - last_value if last_value else 0
-            pct_change = (change / last_value * 100) if last_value and last_value != 0 else 0
-            
-            # Format values safely
-            last_value_str = f"{last_value:,.2f}" if last_value else "N/A"
-            forecast_str = f"{forecast:,.2f}" if forecast else "N/A"
-            change_str = f"{change:,.2f}" if change else "0.00"
-            pct_str = f"{pct_change:+.2f}%" if pct_change else "0.00%"
-            
-            # Get forecast list for better interpretation
-            forecast_periods = len(forecasts)
-            avg_forecast = sum(forecasts) / len(forecasts) if forecasts else forecast
-            
-            # Build unit info with description if available
-            if unit_name and unit_description and unit_description.lower() != unit_name.lower():
-                unit_info = f" for {unit_name} (identified as '{unit_description}')"
-            elif unit_name:
-                unit_info = f" for {unit_name}"
-            else:
-                unit_info = ""
-            
-            prompt = f"""Answer the forecasting question directly using the analysis results.
-
-QUESTION: "{question}"
-
-FORECAST RESULTS:
-- Variable being forecasted: {outcome_name}{unit_info}
-- Current value: {last_value_str}
-- Next period forecast: {forecast_str}
-- Forecast for next {forecast_periods} periods: {avg_forecast:,.2f} (average)
-- Expected change: {change_str} ({pct_str})
-- Model quality (RMSE): {rmse:,.2f}
-- Trend strength (AR coefficient): {ar_coef:.3f}
-- Forecast stability: {"Stable and reliable" if abs(ar_coef) < 0.7 else "Moderate persistence" if abs(ar_coef) < 1 else "High persistence / potentially explosive"}
-
-WRITE YOUR INTERPRETATION:
-
-1. DIRECT ANSWER (1-2 sentences):
-Answer the question directly{unit_info}. What will happen to {outcome_name}? Will it go up, down, or stay the same? ALWAYS mention {unit_name if unit_name else 'the unit'} in your answer.{f' Since the question referred to "{unit_description}", make it clear you identified this as {unit_name}.' if unit_description and unit_name and unit_description.lower() != unit_name.lower() else ''}
+What will happen to {outcome_name}{unit_clause}? Give the direction and rough magnitude.{' Clarify you identified the query as ' + unit_name + '.' if unit_description and unit_name and unit_description.lower() != unit_name.lower() else ''}
 
 2. THE FORECAST (2-3 sentences):
-Explain what the numbers show{unit_info}. From {last_value_str} to {forecast_str} - is this a big change? What's the trend over the next {forecast_periods} periods? Provide context and deeper insight into what drives this trend.
+From {last_value:,.2f} to {forecast_next:,.2f} next period, and an average of {avg_forecast:,.2f} over {n_periods} periods.
+Is this change economically meaningful? What trend does the model capture?
 
-3. CONFIDENCE IN THE FORECAST (1-2 sentences):
-How reliable is this prediction? Mention the model quality and what it means for accuracy. If persistence is high, note that long-run projections can be sensitive to shocks.
+3. MODEL QUALITY & UNCERTAINTY (1-2 sentences):
+Comment on the RMSE and confidence interval. Is the forecast reliable?
 
 4. KEY TAKEAWAY (1 sentence):
-Bottom line - what's the main message about the future of {outcome_name}{unit_info}?
+Bottom line for {outcome_name}{unit_clause}.
 
-FORMATTING RULES:
-- Start directly with your answer - NO introductory phrases like "Here is..." or "Based on..."
-- Use simple bullet points (just hyphens)
-- Write naturally, like explaining to a colleague
-- Be direct and clear
+FORMATTING:
+- No introductory phrases ("Here is…", "Based on…")
+- Use plain bullet points (hyphens)
+- Write like explaining to a smart colleague
 """
-            
-            interpretation = query_gemini(prompt)
-            return interpretation if interpretation else "Unable to generate interpretation"
-    
-    except Exception as e:
-        return f"Interpretation error: {str(e)}"
+    interp = query_gemini(prompt)
+    return interp if interp else _fallback_arima_interpretation(
+        outcome_name, result_dict, unit_clause
+    )
 
+
+def _interpret_regression(
+    question, outcome_name, treatment_name, model_type,
+    result_dict, diagnostics_dict, unit_name, unit_description
+):
+    effect = result_dict.get('treatment_effect', result_dict.get('slope', 0)) or 0
+    se = result_dict.get('se', 0) or 0
+    pval = result_dict.get('pvalue', 1) or 1
+    r_sq = result_dict.get('r_squared', 0) or 0
+    n_obs = result_dict.get('n_obs', 'unknown')
+    ci_lower = result_dict.get('ci_lower', effect - 1.96 * se)
+    ci_upper = result_dict.get('ci_upper', effect + 1.96 * se)
+    se_type = result_dict.get('se_type', 'OLS')
+    fe_type = result_dict.get('fe_type', '')
+
+    significance = (
+        "*** (p<0.001)" if pval < 0.001 else
+        "** (p<0.01)"   if pval < 0.01  else
+        "* (p<0.05)"    if pval < 0.05  else
+        "not significant (p>=0.05)"
+    )
+
+    model_labels = {
+        'diff_in_diff': 'Difference-in-Differences (TWFE)',
+        'panel_ols':    'Panel OLS (Two-Way FE)',
+        'entity_fe':    'Entity Fixed Effects',
+        'time_fe':      'Time Fixed Effects',
+        'first_difference': 'First-Difference Regression',
+        'ols':          'Cross-Sectional OLS',
+        'pooled_ols':   'Pooled OLS',
+        'log_linear':   'Log-Linear Regression',
+        'log_log':      'Log-Log Regression',
+        'polynomial_ols': 'Quadratic OLS',
+        'median_quantile': 'Median Quantile Regression',
+    }
+    model_label = model_labels.get(model_type, model_type)
+
+    causal = model_type == 'diff_in_diff'
+    effect_label = "causal treatment effect" if causal else "regression coefficient"
+
+    unit_clause = _unit_clause(unit_name, unit_description)
+    diag = _diag_text(diagnostics_dict)
+
+    prompt = f"""Answer the research question directly using the statistical results.
+
+QUESTION: "{question}"
+
+MODEL: {model_label}
+{f'Fixed effects: {fe_type}' if fe_type else ''}
+Standard errors: {se_type}
+
+RESULTS{unit_clause}:
+- Outcome: {outcome_name}
+- Predictor: {treatment_name}
+- {effect_label.capitalize()}: {effect:,.4f}
+- SE: {se:,.4f}
+- P-value: {pval:.4f}  ({significance})
+- 95% CI: [{ci_lower:,.4f}, {ci_upper:,.4f}]
+- R-squared: {r_sq:.4f}  ({r_sq*100:.1f}% of variation explained)
+- N observations: {n_obs:,}{diag}
+
+WRITE YOUR INTERPRETATION:
+
+1. DIRECT ANSWER (1-2 sentences):
+{'Does ' + treatment_name + ' causally affect ' + outcome_name + '?' if causal else 'What is the relationship between ' + treatment_name + ' and ' + outcome_name + '?'}{unit_clause}
+Give the sign, magnitude, and significance in plain English.
+
+2. WHAT THE NUMBERS MEAN (2-3 sentences):
+Explain the effect size practically. Is {effect:.2f} large or small in context?
+{'Mention that unit and time fixed effects were absorbed, so this reflects within-unit variation.' if fe_type else ''}
+{'Note any diagnostic corrections that were applied.' if diag else ''}
+
+3. STATISTICAL CONFIDENCE (1-2 sentences):
+How confident should we be? Translate the p-value and CI into everyday language.
+
+4. KEY TAKEAWAY (1 sentence):
+Bottom line on the {('causal' if causal else 'statistical')} link between {treatment_name} and {outcome_name}.
+
+FORMATTING:
+- No introductory phrases
+- Plain hyphens for bullets
+- Conversational but precise
+"""
+    interp = query_gemini(prompt)
+    return interp if interp else _fallback_regression_interpretation(
+        outcome_name, treatment_name, model_label, effect, pval,
+        ci_lower, ci_upper, r_sq, n_obs, causal, unit_clause
+    )
+
+
+def _fallback_arima_interpretation(outcome_name, result_dict, unit_clause):
+    """Deterministic interpretation when the LLM is unavailable."""
+    forecasts = result_dict.get('forecasts', [])
+    last_value = result_dict.get('last_value', 0) or 0
+    next_value = forecasts[0] if forecasts else result_dict.get('forecast_next_period', 0)
+    change = next_value - last_value
+    direction = "increase" if change > 0 else "decrease" if change < 0 else "stay roughly flat"
+    rmse = result_dict.get('rmse', 0) or 0
+    return (
+        f"- Direct answer: {outcome_name}{unit_clause} is expected to {direction}; "
+        f"the next forecast is {next_value:,.4f} versus the last observed value of {last_value:,.4f}.\n"
+        f"- Forecast uncertainty: the model RMSE is {rmse:,.4f}, so treat the point forecast as a directional estimate rather than a guarantee.\n"
+        f"- Key takeaway: Espresso completed the statistical forecast and used this local summary because the LLM interpretation service was unavailable."
+    )
+
+
+def _fallback_regression_interpretation(
+    outcome_name, treatment_name, model_label, effect, pval,
+    ci_lower, ci_upper, r_sq, n_obs, causal, unit_clause
+):
+    """Deterministic regression interpretation when the LLM is unavailable."""
+    direction = "positive" if effect > 0 else "negative" if effect < 0 else "near-zero"
+    sig = "statistically significant" if pval < 0.05 else "not statistically significant"
+    relationship = "causal effect" if causal else "statistical relationship"
+    return (
+        f"- Direct answer: using {model_label}, the estimated {relationship} of {treatment_name} on "
+        f"{outcome_name}{unit_clause} is {direction} ({effect:,.4f}) and {sig} at the 5% level.\n"
+        f"- Statistical confidence: p={pval:.4f}, 95% CI [{ci_lower:,.4f}, {ci_upper:,.4f}], "
+        f"R-squared={r_sq:.4f}, observations={n_obs}.\n"
+        f"- Key takeaway: Espresso completed the econometric estimate and used this local summary because the LLM interpretation service was unavailable."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic summary formatter (used in CLI output)
+# ---------------------------------------------------------------------------
 
 def interpret_diagnostics(diagnostics_result):
-    """
-    Generate a summary of diagnostic checks for presentation.
-    
-    Args:
-        diagnostics_result: Dictionary from diagnostics module
-    
-    Returns:
-        Formatted string summarizing checks
-    """
-    
-    summary = []
-    
+    """Format a diagnostics dict as a human-readable string for CLI display."""
     if 'error' in diagnostics_result:
         return f"Diagnostic Error: {diagnostics_result['error']}"
-    
-    summary.append(f"PRE-ANALYSIS DIAGNOSTICS ({diagnostics_result.get('model', 'Unknown')})")
-    summary.append("=" * 60)
-    
-    checks = diagnostics_result.get('checks', [])
+
+    lines = [
+        f"PRE-ANALYSIS DIAGNOSTICS ({diagnostics_result.get('model', 'Unknown')})",
+        "=" * 60,
+    ]
+
+    for check in diagnostics_result.get('checks', []):
+        if 'error' in check:
+            lines.append(f"   [WARN] {check.get('test', 'Test')}: {check['error']}")
+        else:
+            status = "[OK]  " if not check.get('is_violated') else "[FAIL]"
+            lines.append(f"   {status} {check.get('interpretation', 'N/A')}")
+
     violations = diagnostics_result.get('violations', [])
     corrections = diagnostics_result.get('corrections', [])
-    
-    for check in checks:
-        if 'error' in check:
-            summary.append(f"   [WARNING] {check.get('test', 'Test')}: {check['error']}")
-        else:
-            status = "[OK]" if not check.get('is_violated', False) else "[FAIL]"
-            summary.append(f"   {status} {check.get('interpretation', 'N/A')}")
-    
+
     if violations:
-        summary.append("\nVIOLATIONS DETECTED:")
+        lines.append("\nVIOLATIONS DETECTED:")
         for v in violations:
-            summary.append(f"   - {v}")
-    
-    if corrections:
-        summary.append("\nCORRECTIONS APPLIED:")
+            lines.append(f"   - {v}")
+        lines.append("\nCORRECTIONS APPLIED:")
         for c in corrections:
-            summary.append(f"   - {c}")
-    
-    if not violations:
-        summary.append("\n[OK] All diagnostic checks passed!")
-    
-    return "\n".join(summary)
+            lines.append(f"   - {c}")
+    else:
+        lines.append("\n[OK] All diagnostic checks passed.")
+
+    return "\n".join(lines)
