@@ -5,3 +5,4 @@ statsmodels>=0.14
 google-genai>=1.0
 python-dotenv>=1.0
 pytest>=8.0
+Flask>=3.0

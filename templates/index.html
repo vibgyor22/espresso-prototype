@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Espresso | AI Econometrics Workbench</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <aside class="sidebar">
+    <div>
+      <div class="brand">Espresso</div>
+      <div class="brand-sub">AI econometrics workbench</div>
+    </div>
+
+    <nav class="model-nav" aria-label="Supported model families">
+      <span>Causal reasoning</span>
+      <span>Forecasting</span>
+      <span>Panel econometrics</span>
+      <span>Elasticities</span>
+      <span>Robust association</span>
+    </nav>
+
+    <div class="sidebar-note">
+      Ask a question in plain English. Espresso maps the data, checks model admissibility, runs estimation, and writes a report.
+    </div>
+  </aside>
+
+  <main class="workspace">
+    <section class="top-strip">
+      <div>
+        <p class="eyebrow">Public research interface</p>
+        <h1>Move from dataset to causal reasoning in one run.</h1>
+      </div>
+      <div class="top-actions">
+        <a class="quiet-link" href="/api/datasets" target="_blank" rel="noreferrer">Dataset API</a>
+        <a class="quiet-link" href="https://github.com/vibgyor22/espresso-prototype" target="_blank" rel="noreferrer">GitHub</a>
+      </div>
+    </section>
+
+    <section class="analysis-grid">
+      <form id="analysisForm" class="control-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Input</p>
+            <h2>Research setup</h2>
+          </div>
+          <span class="status-pill" id="statusPill">Ready</span>
+        </div>
+
+        <label class="field">
+          <span>Bundled dataset</span>
+          <select name="dataset_choice" id="datasetChoice">
+            <option value="">Choose an example dataset</option>
+            {% for dataset in datasets %}
+              <option value="{{ dataset.id }}">{{ dataset.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <div class="divider"><span>or upload your own CSV</span></div>
+
+        <label class="drop-zone" id="dropZone">
+          <input type="file" name="dataset_file" id="datasetFile" accept=".csv">
+          <span class="drop-title">Drop a CSV here or browse</span>
+          <span class="drop-meta" id="fileMeta">Maximum 25 MB</span>
+        </label>
+
+        <label class="field">
+          <span>Research question</span>
+          <textarea name="question" id="question" rows="4" placeholder="Does treatment affect GDP growth?"></textarea>
+        </label>
+
+        <div class="two-col">
+          <label class="field">
+            <span>Model override</span>
+            <select name="model" id="model">
+              <option value="">Auto-select best admissible model</option>
+              {% for model in models %}
+                <option value="{{ model.key }}">{{ model.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Forecast periods</span>
+            <input type="number" min="1" max="50" name="forecast_periods" id="forecastPeriods" placeholder="Auto">
+          </label>
+        </div>
+
+        <button class="primary-button" type="submit">
+          Run Espresso analysis
+        </button>
+      </form>
+
+      <section class="preview-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Data</p>
+            <h2>Preview</h2>
+          </div>
+          <span id="datasetMeta" class="muted">No dataset selected</span>
+        </div>
+        <div class="table-wrap">
+          <table id="previewTable">
+            <thead></thead>
+            <tbody>
+              <tr><td class="empty-state">Choose a bundled dataset or upload a CSV.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section class="result-panel" id="resultPanel" hidden>
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Output</p>
+          <h2 id="resultTitle">Analysis result</h2>
+        </div>
+        <a class="report-button" id="reportLink" href="#" target="_blank" rel="noreferrer">Open HTML report</a>
+      </div>
+
+      <div class="metrics" id="metrics"></div>
+
+      <div class="result-layout">
+        <div>
+          <h3>Interpretation</h3>
+          <div class="interpretation" id="interpretation"></div>
+        </div>
+        <div>
+          <h3>Diagnostics</h3>
+          <pre class="diagnostics" id="diagnostics"></pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

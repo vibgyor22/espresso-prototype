@@ -87,6 +87,24 @@ python run_analysis.py --data data/test_causal.csv --question "Does treatment af
 
 Espresso prints the result in the terminal and writes a shareable HTML report to `outputs/`.
 
+## Browser Workbench
+
+Espresso also includes a public-facing web interface:
+
+```bash
+python web_app.py
+```
+
+Open `http://127.0.0.1:5000` and use the workbench to:
+
+- choose a bundled dataset or upload your own CSV
+- ask an econometric question in plain English
+- optionally select a specific model
+- inspect the data preview before running
+- review estimates, diagnostics, interpretation, and the generated HTML report
+
+The UI is intentionally local-first: anyone can clone the repository, add a Gemini key, and run the workbench without a frontend build step.
+
 ## Example Workflows
 
 ### Estimate A Causal Effect
