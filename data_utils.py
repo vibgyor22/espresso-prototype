@@ -43,11 +43,46 @@ def get_column_samples(df, n=5):
 
 def find_indicator_column(df):
     """
-    Heuristically find a column that likely contains indicator/series names.
-    Returns the column name or None.
+    Find the column containing human-readable indicator/series names.
+
+    Priority order:
+      1. Columns whose name is exactly 'indicator' or 'series_name' (case-insensitive)
+      2. Columns containing 'indicator' in the name but NOT 'code'
+      3. Columns containing 'series' + 'name' (e.g. SERIES_NAME)
+      4. Columns containing 'name' but not 'code'
+      5. Columns containing 'series' (fallback, may be a code column)
+
+    Within each tier prefer columns with more unique values (names > codes).
     """
-    candidates = [c for c in df.columns if 'indicator' in c.lower() or 'series' in c.lower() or 'name' in c.lower()]
-    return candidates[0] if candidates else None
+    lc = {c: c.lower() for c in df.columns}
+
+    def n_unique(col):
+        try:
+            return df[col].nunique()
+        except Exception:
+            return 0
+
+    def best(cols):
+        return max(cols, key=n_unique) if cols else None
+
+    tier1 = [c for c, l in lc.items() if l in ('indicator', 'series_name', 'seriesname')]
+    if tier1:
+        return best(tier1)
+
+    tier2 = [c for c, l in lc.items() if 'indicator' in l and 'code' not in l]
+    if tier2:
+        return best(tier2)
+
+    tier3 = [c for c, l in lc.items() if 'series' in l and 'name' in l]
+    if tier3:
+        return best(tier3)
+
+    tier4 = [c for c, l in lc.items() if 'name' in l and 'code' not in l]
+    if tier4:
+        return best(tier4)
+
+    tier5 = [c for c, l in lc.items() if 'series' in l]
+    return best(tier5) if tier5 else None
 
 
 def get_year_columns(df):

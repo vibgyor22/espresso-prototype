@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "espresso-protocol"
+version = "0.1.0"
+description = "Agentic econometric analyst for the terminal — Claude Code, but for econometrics."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Vibhor Vanvani" }]
+keywords = ["econometrics", "statistics", "agent", "cli", "data-science", "causal-inference", "forecasting"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "statsmodels>=0.14",
+    "anthropic>=0.40",
+    "google-genai>=1.0",
+    "python-dotenv>=1.0",
+    "rich>=13.7",
+    "typer>=0.12",
+    "plotext>=5.2",
+    "openpyxl>=3.1",
+    "prompt_toolkit>=3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+espresso = "espresso.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/vibgyor22/espresso-protocol"
+
+[tool.setuptools]
+py-modules = [
+    "data_utils",
+    "diagnostics",
+    "html_report",
+    "interpretation",
+    "llm",
+    "model_specs",
+    "models",
+    "selector",
+    "run_analysis",
+]
+
+[tool.setuptools.packages.find]
+include = ["espresso*"]

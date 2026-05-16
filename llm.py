@@ -1,33 +1,78 @@
 """
-LLM interface for Espresso (Gemini).
+LLM interface for Espresso.
 
-Responsibilities:
-  - parse_question    : NL question → structured intent JSON
-  - map_columns       : intent + column samples → column mapping
-  - identify_unit_value : fuzzy-match a unit description to a data value
-  - query_gemini      : generic text generation for interpretation
+Backends (auto-selected):
+  - Anthropic Claude (preferred when ANTHROPIC_API_KEY is set)
+        Models default to claude-haiku-4-5-20251001 (cheap, fast).
+        Override via ESPRESSO_CLAUDE_MODEL.
+  - Google Gemini (fallback when only GEMINI_API_KEY is set)
+
+Public API stays stable — `parse_question`, `map_columns`,
+`identify_unit_value`, `query_gemini` (kept for back-compat; routes to the
+active backend). When no backend is available the functions return safe
+defaults and the rest of the pipeline degrades gracefully to its local prose.
 """
 
+from __future__ import annotations
+
 import json
-import google.genai as genai
 import os
-import time
 import random
+import time
+
 from dotenv import load_dotenv
 
 load_dotenv()
-api_key = os.getenv("GEMINI_API_KEY")
-
-try:
-    client = genai.Client(api_key=api_key)
-    print("[LLM] Gemini client initialized")
-except Exception as e:
-    print(f"[LLM] Warning: could not initialize Gemini client: {e}")
-    client = None
 
 
 # ---------------------------------------------------------------------------
-# System prompts
+# Backend detection
+# ---------------------------------------------------------------------------
+
+_ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
+_GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+
+CLAUDE_MODEL = os.getenv("ESPRESSO_CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+GEMINI_MODEL_FAST = "gemini-2.5-flash"
+GEMINI_MODEL_QUALITY = "gemini-2.5-pro"
+
+_anthropic_client = None
+_gemini_client = None
+BACKEND: str = "none"
+
+_VERBOSE_LLM = os.getenv("ESPRESSO_LLM_VERBOSE", "0") not in ("", "0", "false", "False")
+
+
+def _llog(msg: str) -> None:
+    """Internal LLM debug log — silent by default; set ESPRESSO_LLM_VERBOSE=1 to enable."""
+    if _VERBOSE_LLM:
+        print(msg)
+
+
+if _ANTHROPIC_KEY:
+    try:
+        import anthropic
+        _anthropic_client = anthropic.Anthropic(api_key=_ANTHROPIC_KEY)
+        BACKEND = "anthropic"
+        _llog(f"[LLM] Anthropic backend ready · model={CLAUDE_MODEL}")
+    except Exception as e:  # pragma: no cover
+        _llog(f"[LLM] Could not initialize Anthropic client: {e}")
+
+if BACKEND == "none" and _GEMINI_KEY:
+    try:
+        import google.genai as genai
+        _gemini_client = genai.Client(api_key=_GEMINI_KEY)
+        BACKEND = "gemini"
+        _llog(f"[LLM] Gemini backend ready · model={GEMINI_MODEL_FAST}/{GEMINI_MODEL_QUALITY}")
+    except Exception as e:  # pragma: no cover
+        _llog(f"[LLM] Could not initialize Gemini client: {e}")
+
+if BACKEND == "none":
+    _llog("[LLM] No API key found (set ANTHROPIC_API_KEY or GEMINI_API_KEY).")
+
+
+# ---------------------------------------------------------------------------
+# Prompts (system text moved to module-level so Claude can prompt-cache them)
 # ---------------------------------------------------------------------------
 
 PARSE_PROMPT = """You are a JSON extractor. Extract analytical intent from research questions.
@@ -62,237 +107,237 @@ Examples:
 "Forecast unemployment in India for the next 10 years"
 {"question_type":"forecast","outcome":"unemployment","treatment":null,"time":"year","unit":"country","unit_value":"India","forecast_periods":10,"pre_period":null}
 
-"What was the effect of the 2008 crisis (starting 2008) on bank lending?"
-{"question_type":"causal_effect","outcome":"bank_lending","treatment":"crisis","time":"year","unit":"country","unit_value":null,"forecast_periods":null,"pre_period":2007}
-
-"How will GDP change in the most innovative country in Europe over 5 years?"
-{"question_type":"forecast","outcome":"gdp","treatment":null,"time":"year","unit":"country","unit_value":"most innovative country in europe","forecast_periods":5,"pre_period":null}
-
-Output JSON only:"""
+Output JSON only.
+"""
 
 
 # ---------------------------------------------------------------------------
-# Shared retry helper
+# Backend dispatch
 # ---------------------------------------------------------------------------
 
-def _generate_with_retry(model, contents, config=None, max_retries=5):
-    """Exponential backoff retry for transient Gemini errors (429, timeouts)."""
-    if not client:
-        raise RuntimeError("Gemini client not initialized")
+def _is_transient(msg: str) -> bool:
+    msg = msg.lower()
+    return any(kw in msg for kw in (
+        "429", "rate", "resource_exhausted", "too many requests",
+        "timeout", "temporarily", "unavailable", "overloaded",
+    ))
 
-    base_delay, max_delay = 2.0, 30.0
 
+def _chat(*, system: str, user: str, temperature: float = 0.2,
+          max_tokens: int = 1024, model: str | None = None,
+          cache_system: bool = True, max_retries: int = 4) -> str:
+    """
+    Single chat completion. Returns the assistant text, or "" on failure.
+
+    `cache_system=True` enables Anthropic prompt caching on the system block,
+    which pays off because we send the same system text for many short user
+    prompts within a single CLI session.
+    """
+    if BACKEND == "anthropic":
+        return _call_anthropic(system=system, user=user, temperature=temperature,
+                               max_tokens=max_tokens, model=model or CLAUDE_MODEL,
+                               cache_system=cache_system, max_retries=max_retries)
+    if BACKEND == "gemini":
+        return _call_gemini(system=system, user=user, temperature=temperature,
+                            model=model or GEMINI_MODEL_FAST, max_retries=max_retries)
+    return ""
+
+
+def _call_anthropic(*, system: str, user: str, temperature: float, max_tokens: int,
+                    model: str, cache_system: bool, max_retries: int) -> str:
+    base, cap = 1.5, 20.0
+    sys_blocks = (
+        [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+        if cache_system and system else
+        system
+    )
     for attempt in range(1, max_retries + 1):
         try:
-            return client.models.generate_content(
+            resp = _anthropic_client.messages.create(
                 model=model,
-                contents=contents,
-                config=config
+                system=sys_blocks,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                messages=[{"role": "user", "content": user}],
             )
+            parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
+            return "".join(parts).strip()
         except Exception as e:
-            msg = str(e).lower()
-            is_transient = any(kw in msg for kw in [
-                '429', 'rate', 'resource_exhausted', 'too many requests',
-                'timeout', 'temporarily', 'unavailable'
-            ])
-            if attempt == max_retries or not is_transient:
-                raise
-            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
-            sleep_for = delay + random.uniform(0, 0.5)
-            print(f"[LLM] Transient error (attempt {attempt}/{max_retries}). "
-                  f"Retrying in {sleep_for:.1f}s…")
-            time.sleep(sleep_for)
+            err = str(e)
+            if attempt == max_retries or not _is_transient(err):
+                _llog(f"[LLM] Anthropic error: {err.splitlines()[0]}")
+                return ""
+            delay = min(cap, base * (2 ** (attempt - 1))) + random.uniform(0, 0.4)
+            _llog(f"[LLM] Transient Anthropic error, retry {attempt}/{max_retries} in {delay:.1f}s")
+            time.sleep(delay)
+    return ""
 
 
-def _extract_json(text):
-    """Extract the first {...} block from a string."""
-    if '{' in text:
-        start = text.index('{')
-        end = text.rindex('}') + 1
-        return text[start:end]
+def _call_gemini(*, system: str, user: str, temperature: float,
+                 model: str, max_retries: int) -> str:
+    base, cap = 1.5, 20.0
+    contents = f"{system}\n\n{user}" if system else user
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = _gemini_client.models.generate_content(
+                model=model, contents=contents,
+                config={"temperature": temperature, "top_p": 0.95, "top_k": 40},
+            )
+            return (resp.text or "").strip()
+        except Exception as e:
+            err = str(e)
+            if attempt == max_retries or not _is_transient(err):
+                msg = err.lower()
+                if "quota" in msg or "resource_exhausted" in msg:
+                    _llog("[LLM] Gemini quota reached.")
+                else:
+                    _llog(f"[LLM] Gemini error: {err.splitlines()[0]}")
+                return ""
+            delay = min(cap, base * (2 ** (attempt - 1))) + random.uniform(0, 0.4)
+            _llog(f"[LLM] Transient Gemini error, retry {attempt}/{max_retries} in {delay:.1f}s")
+            time.sleep(delay)
+    return ""
+
+
+def _extract_json(text: str) -> str:
+    if not text:
+        return text
+    if "```" in text:
+        text = text.replace("```json", "```").split("```")[1] if "```" in text else text
+    if "{" in text:
+        return text[text.index("{"): text.rindex("}") + 1]
     return text
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Public API — same surface as before
 # ---------------------------------------------------------------------------
 
-def parse_question(text):
-    """
-    Parse a natural-language research question into a structured intent dict.
-
-    Returns a dict with keys: question_type, outcome, treatment, time, unit,
-    unit_value, forecast_periods, pre_period — or None on failure.
-    """
-    if not client:
-        print("[ERROR] Gemini client not initialized")
+def parse_question(text: str):
+    """NL question → structured intent dict, or None."""
+    if BACKEND == "none":
         return None
     try:
-        print(f"[LLM] Parsing question: {text[:60]}…")
-        resp = _generate_with_retry(
-            model="gemini-2.5-flash",
-            contents=f"{PARSE_PROMPT}\n\nQuestion: {text}\n\nJSON:",
-            config={"temperature": 0.1, "top_p": 0.9, "top_k": 40}
+        _llog(f"[LLM] Parsing question: {text[:60]}…")
+        out = _chat(
+            system=PARSE_PROMPT,
+            user=f"Question: {text}\n\nJSON:",
+            temperature=0.1, max_tokens=400,
         )
-        raw = _extract_json(resp.text.strip())
-        result = json.loads(raw)
-        print(f"[LLM] Intent: {result}")
+        result = json.loads(_extract_json(out))
+        _llog(f"[LLM] Intent: {result}")
         return result
     except Exception as e:
-        print(f"[ERROR] parse_question failed: {e}")
+        _llog(f"[LLM] parse_question failed: {e}")
         return None
 
 
-def map_columns(intent, column_samples):
-    """
-    Map intent fields to actual dataset column names.
-
-    `column_samples` : {column_name: [sample_value_str, ...]}
-
-    Returns a mapping dict (see prompt schema below).
-    """
-    if not client:
+def map_columns(intent: dict, column_samples: dict):
+    """Map intent fields to actual dataset column names."""
+    if BACKEND == "none":
         return {"outcome": None, "treatment": None, "time": None, "unit": None}
     try:
-        print(f"[LLM] Mapping columns…")
+        _llog("[LLM] Mapping columns…")
         cols_text = "\n".join(
             f"- {col}: {', '.join(samples[:5])}"
             for col, samples in column_samples.items()
         )
-
-        prompt = (
-            "You are given a dataset's column names and sample values. "
-            "Decide whether this dataset is 'indicator-style' (one row per series "
-            "with year columns) or a regular tidy table. "
-            "Return a single JSON object describing how to map the user's intent variables.\n\n"
+        system = (
+            "You map a parsed user intent to actual dataset columns. "
+            "If the dataset is indicator-style (one row per series with year columns), "
+            "set pivot=true and map outcome/treatment to EXACT indicator values from the samples. "
+            "Otherwise map to direct column names. Output JSON only — no prose, no fences."
+        )
+        user = (
             f"Columns and samples:\n{cols_text}\n\n"
             f"User intent: {json.dumps(intent)}\n\n"
-            "CRITICAL: If the dataset has an indicator/series column with many values, "
-            "map outcome/treatment to EXACT indicator values visible in the samples. "
-            "DO NOT invent indicator names.\n\n"
-            "RESPONSE FORMAT (JSON only):\n"
-            "{\n"
-            "  \"outcome\": {\"type\": \"column|indicator\", \"value\": \"...\"},\n"
-            "  \"treatment\": {\"type\": \"column|indicator\", \"value\": \"...\"},\n"
-            "  \"time\": {\"type\": \"column|years\", \"value\": \"<col>\" or [year_list]},\n"
-            "  \"unit\": {\"type\": \"column\", \"value\": \"<col>\"},\n"
-            "  \"pivot\": true|false,\n"
-            "  \"indicator_column\": \"<col>\" or null,\n"
-            "  \"year_columns\": [list] or null,\n"
-            "  \"notes\": \"short explanation\"\n"
-            "}\n\n"
-            "Only output valid JSON matching the schema."
+            "Response schema:\n"
+            '{ "outcome": {"type": "column|indicator", "value": "..."},\n'
+            '  "treatment": {"type": "column|indicator", "value": "..."},\n'
+            '  "time": {"type": "column|years", "value": "<col>" or [year_list]},\n'
+            '  "unit": {"type": "column", "value": "<col>"},\n'
+            '  "pivot": true|false,\n'
+            '  "indicator_column": "<col>" or null,\n'
+            '  "year_columns": [list] or null,\n'
+            '  "notes": "short explanation" }'
         )
-
-        resp = _generate_with_retry(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config={"temperature": 0.1, "top_p": 0.9, "top_k": 40}
-        )
-        mapping = json.loads(_extract_json(resp.text.strip()))
-        print(f"[LLM] Column mapping: {list(mapping.keys())}")
+        out = _chat(system=system, user=user, temperature=0.1, max_tokens=600)
+        mapping = json.loads(_extract_json(out))
+        _llog(f"[LLM] Column mapping: {list(mapping.keys())}")
         return mapping
     except Exception as e:
-        print(f"[ERROR] map_columns failed: {e}")
+        _llog(f"[LLM] map_columns failed: {e}")
         return {"outcome": None, "treatment": None, "time": None, "unit": None}
 
 
-def identify_unit_value(unit_description, unit_column_name, df):
-    """
-    Resolve a unit description (exact name or phrase) to a value in the data.
-
-    e.g. "most innovative country in europe" → "Switzerland"
-    """
-    if not client or not unit_description or not unit_column_name:
+def identify_unit_value(unit_description: str, unit_column_name: str, df):
+    """Resolve a unit description (exact name or phrase) to an actual data value."""
+    if BACKEND == "none" or not unit_description or not unit_column_name:
         return None
     try:
         all_units = df[unit_column_name].dropna().unique().tolist()
-
-        # Prioritise units that partially match the description
         low_desc = unit_description.lower()
         matches = [u for u in all_units if low_desc in str(u).lower()]
         sample = (matches[:50] + [u for u in all_units if u not in matches][:50])
 
-        prompt = (
-            f"You are given a list of {unit_column_name} values from a dataset.\n"
-            f"Identify which specific value matches: \"{unit_description}\"\n\n"
-            f"Available values:\n{', '.join(str(u) for u in sample)}\n\n"
-            "Rules:\n"
-            "- Return the EXACT value from the list that best matches.\n"
-            "- Use your world knowledge for descriptive phrases "
-            "(e.g. 'most happy country in europe' → 'Finland').\n"
-            "- Return only the matched value — no explanation.\n"
-            "- If no match is possible, return NOT_FOUND.\n\n"
+        system = (
+            "Given a list of dataset values and a description, return the EXACT value from "
+            "the list that best matches. Use world knowledge for descriptive phrases "
+            "(e.g. 'most happy country in europe' → 'Finland'). "
+            "If nothing reasonably matches, return NOT_FOUND. Output only the matched value."
+        )
+        user = (
+            f"Column: {unit_column_name}\n"
+            f"Description: \"{unit_description}\"\n"
+            f"Available values: {', '.join(str(u) for u in sample)}\n\n"
             "Matched value:"
         )
-
-        resp = _generate_with_retry(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config={"temperature": 0.1, "top_p": 0.9, "top_k": 40}
-        )
-        identified = resp.text.strip()
-        print(f"[LLM] Identified unit: '{identified}'")
-
+        identified = _chat(system=system, user=user, temperature=0.1, max_tokens=80).strip()
+        _llog(f"[LLM] Identified unit: '{identified}'")
+        if not identified or identified == "NOT_FOUND":
+            return None
         if identified in all_units:
             return identified
-        if identified == "NOT_FOUND":
-            return None
-
-        # Fuzzy fallback: case-insensitive + prefix stripping
-        id_low = identified.lower()
+        # Fuzzy fallback (preserved from old code)
         ignore = [
             "people's republic of", "republic of", "kingdom of",
             "special administrative region", "the ", "province of",
-            "commonwealth of", "state of "
+            "commonwealth of", "state of ",
         ]
         def strip_prefix(s):
             for p in ignore:
-                s = s.replace(p, '').strip(' ,')
+                s = s.replace(p, "").strip(" ,")
             return s
-
-        id_clean = strip_prefix(id_low)
+        id_low = strip_prefix(identified.lower())
         best, best_score = None, 0.0
         for u in all_units:
             u_clean = strip_prefix(str(u).lower())
             if not u_clean:
                 continue
-            if id_clean == u_clean:
+            if id_low == u_clean:
                 return u
-            if (id_clean in u_clean or u_clean in id_clean) and len(id_clean) > 3:
-                if 'special administrative region' not in str(u).lower():
-                    score = 1.0 / (1 + 0.1 * len(str(u).split()))
-                    if score > best_score:
-                        best_score = score
-                        best = u
-        if best:
-            print(f"[LLM] Fuzzy matched '{identified}' → '{best}'")
-            return best
-        return None
-
+            if (id_low in u_clean or u_clean in id_low) and len(id_low) > 3:
+                score = 1.0 / (1 + 0.1 * len(str(u).split()))
+                if score > best_score:
+                    best_score, best = score, u
+        return best
     except Exception as e:
-        print(f"[ERROR] identify_unit_value failed: {e}")
+        _llog(f"[LLM] identify_unit_value failed: {e}")
         return None
 
 
-def query_gemini(prompt):
+def query_gemini(prompt: str) -> str:
     """
-    Generic Gemini call for interpretation / explanation text.
-
-    Uses gemini-2.5-pro for higher quality prose.
+    Generic prose generation. Name kept for back-compat; routes to whichever
+    backend is active. Used by interpretation, context, why-columns, etc.
     """
-    try:
-        resp = _generate_with_retry(
-            model="gemini-2.5-pro",
-            contents=prompt,
-            config={"temperature": 0.7, "top_p": 0.95, "top_k": 40},
-            max_retries=1
-        )
-        return resp.text.strip() if resp and resp.text else ""
-    except Exception as e:
-        msg = str(e).lower()
-        if "quota" in msg or "429" in msg or "resource_exhausted" in msg:
-            print("[LLM] Interpretation quota reached; using local statistical summary.")
-        else:
-            print(f"[LLM] Interpretation unavailable; using local statistical summary ({type(e).__name__}).")
+    if BACKEND == "none":
         return ""
+    return _chat(
+        system="You are an econometrician explaining results to a non-expert. "
+               "Be precise, clear, and honest about uncertainty. Never fabricate citations.",
+        user=prompt,
+        temperature=0.5,
+        max_tokens=900,
+        model=GEMINI_MODEL_QUALITY if BACKEND == "gemini" else None,
+    )

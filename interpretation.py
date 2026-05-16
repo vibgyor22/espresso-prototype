@@ -268,11 +268,14 @@ def _fallback_arima_interpretation(outcome_name, result_dict, unit_clause):
     change = next_value - last_value
     direction = "increase" if change > 0 else "decrease" if change < 0 else "stay roughly flat"
     rmse = result_dict.get('rmse', 0) or 0
+    pct = (change / last_value * 100) if last_value else 0
+    avg = sum(forecasts) / len(forecasts) if forecasts else next_value
     return (
-        f"- Direct answer: {outcome_name}{unit_clause} is expected to {direction}; "
-        f"the next forecast is {next_value:,.4f} versus the last observed value of {last_value:,.4f}.\n"
-        f"- Forecast uncertainty: the model RMSE is {rmse:,.4f}, so treat the point forecast as a directional estimate rather than a guarantee.\n"
-        f"- Key takeaway: Espresso completed the statistical forecast and used this local summary because the LLM interpretation service was unavailable."
+        f"- Direction: {outcome_name}{unit_clause} is expected to {direction} from {last_value:,.4f} "
+        f"to {next_value:,.4f} next period ({pct:+.2f}%).\n"
+        f"- Horizon: average forecast over {len(forecasts)} periods is {avg:,.4f}.\n"
+        f"- Uncertainty: model RMSE is {rmse:,.4f}; treat the point forecast as a central estimate, "
+        f"not a guarantee, especially further out."
     )
 
 
@@ -284,12 +287,18 @@ def _fallback_regression_interpretation(
     direction = "positive" if effect > 0 else "negative" if effect < 0 else "near-zero"
     sig = "statistically significant" if pval < 0.05 else "not statistically significant"
     relationship = "causal effect" if causal else "statistical relationship"
+    crosses_zero = (ci_lower or 0) <= 0 <= (ci_upper or 0)
+    confidence_phrase = (
+        "the 95% confidence interval excludes zero, so the sign is well-determined"
+        if not crosses_zero else
+        "the 95% confidence interval crosses zero, so we can't rule out 'no effect'"
+    )
     return (
-        f"- Direct answer: using {model_label}, the estimated {relationship} of {treatment_name} on "
-        f"{outcome_name}{unit_clause} is {direction} ({effect:,.4f}) and {sig} at the 5% level.\n"
-        f"- Statistical confidence: p={pval:.4f}, 95% CI [{ci_lower:,.4f}, {ci_upper:,.4f}], "
-        f"R-squared={r_sq:.4f}, observations={n_obs}.\n"
-        f"- Key takeaway: Espresso completed the econometric estimate and used this local summary because the LLM interpretation service was unavailable."
+        f"- Estimate: {model_label} finds a {direction} {relationship} of {treatment_name} on "
+        f"{outcome_name}{unit_clause}, magnitude {effect:,.4f}.\n"
+        f"- Significance: {sig} at the 5% level (p={pval:.4f}); {confidence_phrase} "
+        f"(95% CI [{ci_lower:,.4f}, {ci_upper:,.4f}]).\n"
+        f"- Fit: R² = {r_sq:.4f} on {n_obs} observations."
     )
 
 

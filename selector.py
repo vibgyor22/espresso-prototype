@@ -37,9 +37,20 @@ def select_admissible_models(intent, data):
     for model in candidates:
         spec = MODEL_SPECS[model]
 
-        missing = [field for field in spec["required_fields"] if intent.get(field) is None]
-        if missing:
-            rejected[model] = f"Missing required fields: {', '.join(missing)}"
+        # Reject if required columns are missing from the data
+        missing_fields = [field for field in spec["required_fields"] if intent.get(field) is None]
+        if missing_fields:
+            rejected[model] = f"Missing required fields: {', '.join(missing_fields)}"
+            continue
+        missing_cols = [
+            f for f in ("outcome", "treatment", "unit", "time")
+            if f in spec["required_fields"]
+            and intent.get(f) is not None
+            and intent[f] not in data.columns
+        ]
+        if missing_cols:
+            bad = {f: intent[f] for f in missing_cols}
+            rejected[model] = f"Columns not in data: {bad}"
             continue
 
         if spec.get("requires_panel"):
@@ -60,12 +71,18 @@ def select_admissible_models(intent, data):
         outcome = intent.get("outcome")
         treatment = intent.get("treatment")
         if spec.get("requires_positive_outcome"):
+            if outcome not in data.columns:
+                rejected[model] = f"Outcome column '{outcome}' not found in data"
+                continue
             y = pd.to_numeric(data[outcome], errors="coerce").dropna()
             if y.empty or (y <= 0).any():
                 rejected[model] = f"Outcome '{outcome}' must be strictly positive"
                 continue
 
         if spec.get("requires_positive_treatment"):
+            if treatment not in data.columns:
+                rejected[model] = f"Predictor column '{treatment}' not found in data"
+                continue
             x = pd.to_numeric(data[treatment], errors="coerce").dropna()
             if x.empty or (x <= 0).any():
                 rejected[model] = f"Predictor '{treatment}' must be strictly positive"

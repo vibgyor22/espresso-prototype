@@ -1,224 +1,103 @@
 # Espresso
 
-**AI econometrics for causal reasoning, forecasting, and empirical discovery.**
+> Agentic econometric analyst for the terminal. Think *Claude Code, but for econometrics*.
 
-Espresso turns a plain-English research question and a CSV file into a structured econometric workflow. It reads the question, maps the data, selects an admissible model, runs diagnostics, estimates results, and produces a clear HTML report.
-
-The goal is simple: make rigorous empirical analysis feel as direct as asking the question.
-
-## Why Espresso Exists
-
-Most statistical tools expect the user to already know the model, the formula, the data shape, the assumptions, and the diagnostic checks. Espresso reverses that workflow.
-
-You ask:
-
-> Does treatment improve GDP growth?
-
-Espresso responds with a research pipeline:
-
-- identifies the question as causal, forecasting, or associational
-- maps natural-language concepts to columns in the dataset
-- checks whether the data can support the requested model
-- runs econometric diagnostics before estimation
-- estimates the model with robust or clustered uncertainty where appropriate
-- explains the result in language a human decision-maker can use
-- saves a polished report for sharing, review, and iteration
-
-Espresso is built for students, analysts, researchers, founders, policy teams, and anyone who wants to move from raw data to statistical reasoning without wrestling with boilerplate.
-
-## What Espresso Can Do
-
-Espresso supports a growing model library across three major analysis modes.
-
-### Causal Reasoning
-
-For questions about effects, impact, treatment, policy, or intervention:
-
-- Difference-in-Differences with two-way fixed effects
-- unit and time fixed effects support
-- treatment variation checks
-- parallel-trends diagnostics
-- clustered standard errors for panel settings
-
-### Forecasting
-
-For questions about what happens next:
-
-- auto-order ARIMA
-- linear trend forecasts
-- exponential smoothing
-- random-walk baseline forecasts
-- forecast intervals and fit diagnostics
-
-### Association And Econometric Discovery
-
-For questions about relationships, elasticities, and patterns:
-
-- OLS with HC1 robust standard errors
-- pooled OLS
-- panel OLS with two-way fixed effects
-- entity fixed effects
-- time fixed effects
-- first-difference regression
-- log-linear regression
-- log-log elasticity models
-- quadratic OLS
-- median quantile regression
-
-## Quick Start
-
-Install dependencies:
+You bring a question and a data file. Espresso decides which columns to use, which model is appropriate, which pre-analysis diagnostics matter, and what to do when something fails — narrating every choice in plain English you can actually follow. No statistical background required.
 
 ```bash
-pip install -r requirements.txt
+pip install espresso-protocol
+espresso analyze gdp.csv --question "Did the 2020 stimulus boost employment?"
 ```
 
-Create a `.env` file with your Gemini API key:
+## What it does
 
-```env
-GEMINI_API_KEY=your-gemini-api-key-here
-```
+- **Reads your data** — CSV, TSV, Excel (multi-sheet), Parquet. Profiles every column (type, range, missingness, candidate role).
+- **Understands your question** — figures out whether you're asking about a causal effect, a correlation, or a forecast.
+- **Picks the right columns** — matches the words in your question to actual columns, and asks you only if it's genuinely unsure.
+- **Picks the right model** — 15+ econometric methods. Diff-in-differences, panel OLS with TWFE, ARIMA, log-log, quantile regression, more.
+- **Runs pre-analysis diagnostics** — stationarity, parallel trends, heteroscedasticity, autocorrelation, normality. Switches to a corrective model when assumptions fail, and tells you why.
+- **Interprets in plain English** — four layers: *why these columns*, *why this model*, *the numbers*, and the qualitative reading: domain context, past trends in your data, recent events that may have shaped it, what empirical literature usually finds, and a sanity check on sign and magnitude.
+- **Suggests follow-ups** — robustness checks, subset analyses, what-if scenarios — pick by number.
+- **Stays in the terminal by default** — rich tables, ascii forecast charts, coefficient bars. Type `export` to get a self-contained HTML dashboard with what-if sliders.
 
-Run your first analysis:
+The statistics are deterministic. The agent layer decides what to run; the math itself never goes through an LLM.
+
+## Quickstart
 
 ```bash
-python run_analysis.py --data data/test_causal.csv --question "Does treatment affect GDP growth?"
+# One-shot
+espresso analyze data.csv -q "What's the effect of minimum wage on employment?"
+
+# With an HTML dashboard
+espresso analyze data.csv -q "Forecast unemployment for 10 years" --export report.html
+
+# Interactive REPL
+espresso
+[espresso] » load data/test_panel.csv
+[espresso] » did the policy work?
+[espresso] » what if treatment = 12
+[espresso] » ?p-value
+[espresso] » export
 ```
 
-Espresso prints the result in the terminal and writes a shareable HTML report to `outputs/`.
+## Why not ChatGPT?
 
-## Browser Workbench
+ChatGPT will tell you *about* difference-in-differences. Espresso *runs* difference-in-differences on your data, *checks the assumptions*, *switches to a more robust estimator* if pre-trends fail, *tells you whether the magnitude is plausible* given what the literature finds, *flags omitted-variable bias when the sign looks weird*, and produces numbers you can trust because the math is deterministic Python, not an LLM hallucinating a p-value.
 
-Espresso also includes a public-facing web interface:
+If you want a senior statistician sitting next to you who happens to know your dataset and a thousand papers — that's the goal.
 
-```bash
-python web_app.py
-```
+## REPL commands
 
-Open `http://127.0.0.1:5000` and use the workbench to:
-
-- choose a bundled dataset or upload your own CSV
-- ask an econometric question in plain English
-- optionally select a specific model
-- inspect the data preview before running
-- review estimates, diagnostics, interpretation, and the generated HTML report
-
-The UI is intentionally local-first: anyone can clone the repository, add a Gemini key, and run the workbench without a frontend build step.
-
-## Example Workflows
-
-### Estimate A Causal Effect
-
-```bash
-python run_analysis.py \
-  --data data/test_causal.csv \
-  --question "Does treatment affect GDP growth?"
-```
-
-Espresso detects a causal-effect question and uses Difference-in-Differences when the panel structure and treatment variation support it.
-
-### Forecast A Time Series
-
-```bash
-python run_analysis.py \
-  --data data/test_panel.csv \
-  --question "Forecast unemployment for the next 3 years" \
-  --forecast-periods 3
-```
-
-Espresso estimates a forecasting model, prints the forecast table, and includes uncertainty bands in the report.
-
-### Explore A Relationship
-
-```bash
-python run_analysis.py \
-  --data data/test_panel.csv \
-  --question "What is the relationship between interest rate and unemployment?" \
-  --model panel_ols
-```
-
-Espresso can automatically choose a model, or you can select one explicitly with `--model`.
-
-## Supported Models
-
-Use this command to see the live model registry:
-
-```bash
-python run_analysis.py --list-models
-```
-
-| Model | Use case |
+| Command | What it does |
 |---|---|
-| `diff_in_diff` | causal effects in panel data |
-| `arima` | time-series forecasting |
-| `linear_trend` | transparent trend forecasting |
-| `exp_smoothing` | short or noisy time-series forecasting |
-| `random_walk` | persistent-series forecast baseline |
-| `panel_ols` | association with unit and time fixed effects |
-| `entity_fe` | within-unit association |
-| `time_fe` | association after common time shocks |
-| `first_difference` | association in within-unit changes |
-| `ols` | cross-sectional regression |
-| `pooled_ols` | pooled regression over all observations |
-| `log_linear` | semi-elasticity estimation |
-| `log_log` | elasticity estimation |
-| `polynomial_ols` | nonlinear quadratic relationships |
-| `median_quantile` | median relationship robust to outliers |
+| `load <path>` | Load a CSV / TSV / XLSX / Parquet file |
+| `ask <question>` | Run an analysis (also: just type a question) |
+| `what if <var> = <n>` | Predict outcome at a scenario value |
+| `what if shock = <n>` | Forecast: shift the most recent value |
+| `?<term>` | Define a term (e.g. `?p-value`, `?fixed effects`) |
+| `show profile` / `show interpretation` | Re-print sections |
+| `export [path.html]` | Save a self-contained dashboard |
+| `<number>` | Pick a suggested follow-up |
 
-## Data Shapes
+## Expert overrides
 
-Espresso works with standard tidy data:
-
-```csv
-country,year,treatment,gdp_growth
-USA,2018,0,2.0
-USA,2019,0,2.3
-USA,2020,1,1.5
-```
-
-It can also reshape wide indicator-style datasets with year columns:
-
-```csv
-country,series_name,2000,2001,2002
-India,Unemployment,7.3,7.1,7.0
-India,GDP growth,3.8,4.8,3.9
-```
-
-## Reports
-
-Every successful run creates a self-contained HTML report with:
-
-- the original research question
-- selected model and model metadata
-- diagnostics and warnings
-- estimates, uncertainty, and significance
-- forecast charts or coefficient visualizations
-- plain-English interpretation
-
-Reports are saved in `outputs/`.
-
-## Testing
-
-Run the test suite with:
+Most of the time you don't need these. When you do:
 
 ```bash
-python -m pytest tests/ -v
+espresso analyze data.csv -q "..." \
+  --outcome gdp_per_capita --treatment policy \
+  --unit country --time year \
+  --model diff_in_diff --level expert --no-clarify
 ```
 
-The tests cover data utilities, model selection, diagnostics, forecasting, causal estimation, and the expanded econometric model library.
+## Setup
 
-## Philosophy
+```bash
+git clone https://github.com/vibgyor22/espresso-protocol
+cd espresso-protocol
+pip install -e .
+echo "GEMINI_API_KEY=your_key" > .env
+```
 
-Espresso is not trying to hide statistics. It is trying to make statistical reasoning easier to begin, easier to audit, and easier to communicate.
+Espresso uses Gemini for question parsing, column mapping, and qualitative interpretation. If the LLM is offline or out of quota, the deterministic fallbacks still produce a complete analysis — just with less qualitative narration.
 
-The future of applied econometrics should feel less like memorizing syntax and more like asking better questions.
+## Supported models
 
-Espresso is a step toward that future.
+**Causal:** difference-in-differences (TWFE).
+**Forecasting:** ARIMA (auto-order), linear trend, exponential smoothing, random walk.
+**Association:** panel OLS (TWFE), entity FE, time FE, first-difference, OLS, pooled OLS, log-linear, log-log, polynomial OLS, median quantile regression.
 
-## Current Boundaries
+All regression models use robust or clustered standard errors as appropriate.
 
-- Espresso is best for first-pass analysis and model exploration.
-- Causal estimates still require a credible research design.
-- LLM-based column mapping can make mistakes on ambiguous datasets.
-- Forecasts are currently univariate after optional panel aggregation.
-- Regression support is currently focused on single-predictor workflows.
+## Documentation
+
+- [Usage and commands](docs/USAGE.md)
+- [Worked examples](docs/EXAMPLES.md)
+
+## License
+
+MIT.
+
+## Status
+
+Beta. The CLI surface is stable; the Python API may move.

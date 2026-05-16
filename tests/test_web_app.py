@@ -12,7 +12,7 @@ def test_homepage_loads():
     client = app.test_client()
     response = client.get("/")
     assert response.status_code == 200
-    assert b"AI econometrics workbench" in response.data
+    assert b"Espresso" in response.data
 
 
 def test_dataset_profile_api_loads():
