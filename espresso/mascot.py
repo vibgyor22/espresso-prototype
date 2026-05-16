@@ -46,18 +46,18 @@ _RESET = "\033[0m"
 # {M} = 7 chars (mouth)
 
 _ROWS = (
-    "  ▄███████▄",
-    "  █ {L}   {R} █",
-    "  █   {M}   █",
-    "  ▀███████▀",
+    "  ▄█████▄",
+    "  █ {L} {R} █",
+    "  ▀█████▀",
 )
 
 _FACES: dict[str, dict[str, str]] = {
-    "normal": {"L": "●", "R": "●", "M": "◡"},
-    "blink":  {"L": "─", "R": "─", "M": "◡"},
-    "wink":   {"L": "─", "R": "●", "M": "◡"},
-    "happy":  {"L": "◉", "R": "◉", "M": "◡"},
-    "alert":  {"L": "◉", "R": "●", "M": "─"},
+    "normal":     {"L": "◆", "R": "◆"},
+    "blink":      {"L": "·", "R": "·"},
+    "wink":       {"L": "·", "R": "◆"},
+    "happy":      {"L": "◈", "R": "◈"},
+    "alert":      {"L": "◉", "R": "◆"},
+    "processing": {"L": "◈", "R": "·"},
 }
 
 
@@ -90,7 +90,7 @@ def render_mascot(variant: str = "normal", colorized: bool = True) -> str:
         colorized: embed ANSI color codes when True
     """
     face = _FACES.get(variant, _FACES["normal"])
-    lines = [row.format(L=face["L"], R=face["R"], M=face["M"]) for row in _ROWS]
+    lines = [row.format(L=face["L"], R=face["R"]) for row in _ROWS]
     if colorized:
         lines = [_colorize(l) for l in lines]
     return "\n".join(lines)
