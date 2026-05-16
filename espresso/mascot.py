@@ -1,299 +1,166 @@
 """
-Espresso Protocol CLI Mascot — asymmetrical pixel creature for terminal display.
+Espresso Protocol Mascot — geometric, friendly, brown.
 
-A minimalist, alien-like mascot with asymmetrical eyes, angled legs, and coffee-colored
-pixel aesthetics. Renders with ANSI 256-color support and multiple animation states
-(idle, happy, alert, processing).
+A small hexagonal sprite with a sparkle accent. Inspired by Claude Code's
+sparkle motif but with its own identity: rounded-corner crystal body,
+asymmetric eyes, warm clay smile, splayed little feet.
+
+Design:
+       ✦         <- sparkle accent (Claude-inspired, but ours)
+      ╭─╮        <- rounded crown
+     ╱   ╲       <- widening shoulders
+    │ ● ● │      <- big friendly eyes
+    │  ⌣  │      <- gentle smile
+     ╲   ╱       <- narrowing hips
+      ╰─╯        <- rounded base
+      ╱ ╲        <- splayed feet
+
+8 lines tall, 7 chars wide at the widest. Color palette is coffee-toned
+(tan, walnut, gold accent, clay smile) — warm browns without being
+literally coffee-themed.
 
 Usage:
-    from espresso.mascot import print_mascot, get_mascot_art
+    from espresso.mascot import render_mascot, print_mascot, animate_loading
 
-    # Print to terminal with colors
-    print_mascot("idle")           # default idle state
-    print_mascot("happy")          # happy variant
-    print_mascot("alert")          # alert variant
-    print_mascot("processing", frame=0)  # processing animation frame 0-3
-
-    # Get raw ASCII without colors
-    art = get_mascot_art("idle", colored=False)
-    print(art)
+    print_mascot()               # idle (normal)
+    print_mascot("blink")        # eyes closed
+    print_mascot("wink")         # left eye closed
+    print_mascot("happy")        # smiling with ^ ^ eyes
+    print_mascot("alert")        # wide-eyed alert
+    animate_loading(2.0)         # blinking loading loop
+    s = render_mascot()          # colorized string
 """
-
 from __future__ import annotations
 
+import sys
+import time
 
-# ANSI 256-color codes (coffee palette)
-COLORS = {
-    "dark_brown":    "\033[38;5;94m",      # #6F4E37 — primary dark brown
-    "medium_brown":  "\033[38;5;137m",     # #8B6F47 — medium brown
-    "tan":           "\033[38;5;180m",     # #D2B48C — tan/light
-    "light_tan":     "\033[38;5;224m",     # cream-tan
-    "outline":       "\033[38;5;52m",      # very dark brown
-    "reset":         "\033[0m",
+try:
+    import colorama
+    colorama.init(autoreset=False)
+except ImportError:
+    pass
+
+
+# ── ANSI 256-color codes ──────────────────────────────────────────────────────
+_OUTLINE = "\033[38;5;137m"   # warm medium brown — body outline
+_DEEP    = "\033[38;5;94m"    # dark coffee — eyes
+_GOLD    = "\033[38;5;220m"   # bright gold — sparkle ✦
+_CLAY    = "\033[38;5;173m"   # warm clay/rose — smile (cuteness pop)
+_DIM     = "\033[38;5;95m"    # muted plum — closed eyes
+_BOLD    = "\033[1m"
+_RESET   = "\033[0m"
+
+
+# ── Mascot variants (8 lines, centered design) ────────────────────────────────
+# Common scaffolding — eyes/mouth slot in via {L_EYE} {R_EYE} {MOUTH}
+
+_TEMPLATE = (
+    "       ✦",
+    "      ╭─╮",
+    "     ╱   ╲",
+    "    │ {L_EYE} {R_EYE} │",
+    "    │  {MOUTH}  │",
+    "     ╲   ╱",
+    "      ╰─╯",
+    "      ╱ ╲",
+)
+
+_FACES = {
+    "normal": {"L_EYE": "●", "R_EYE": "●", "MOUTH": "⌣"},
+    "blink":  {"L_EYE": "-", "R_EYE": "-", "MOUTH": "⌣"},
+    "wink":   {"L_EYE": "-", "R_EYE": "●", "MOUTH": "⌣"},
+    "happy":  {"L_EYE": "^", "R_EYE": "^", "MOUTH": "◡"},
+    "alert":  {"L_EYE": "◉", "R_EYE": "●", "MOUTH": "o"},
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MASCOT DESIGNS (8-10 lines tall, ~24-32 chars wide)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Colorizer ─────────────────────────────────────────────────────────────────
 
-MASCOT_IDLE = """\
-      ▓▓▓░
-     ▓▒░░░▓
-     ▓●  ◯▓
-     ▓░▀▀░▓
-     ▓▒░░░▓
-    ▓░   ░░
-   ░░  ░  ░░
-  ░░      ░
- ░        ░░
-"""
-
-MASCOT_HAPPY = """\
-      ▓▓▓░
-     ▓▒░░░▓
-     ▓●  ◯▓
-     ▓░╭──▓
-     ▓▒░░░▓
-    ▓░   ░░
-   ░░  ░  ░░
-  ░░      ░
- ░        ░░
-"""
-
-MASCOT_ALERT = """\
-      ▓▓▓░
-     ▓▒░░░▓
-     ▓◉  ◯▓
-     ▓░▲▲░▓
-     ▓▒░░░▓
-    ▓░   ░░
-   ░░░░░░░░░
-  ░░       ░
- ░        ░░
-"""
-
-# Processing animation frames (4 states showing loader pattern)
-MASCOT_PROCESSING = [
-    # Frame 0: left leg forward
-    """\
-      ▓▓▓░
-     ▓▒░░░▓
-     ▓◐  ◑▓
-     ▓░▁▁░▓
-     ▓▒░░░▓
-    ▓░ ░ ░░
-   ░░░    ░░
-  ░░       ░
- ░        ░░
-""",
-    # Frame 1: right leg forward
-    """\
-      ▓▓▓░
-     ▓▒░░░▓
-     ▓◐  ◑▓
-     ▓░▁▁░▓
-     ▓▒░░░▓
-    ▓░  ░ ░
-   ░░  ░░░░░
-  ░░       ░
- ░        ░░
-""",
-    # Frame 2: both legs
-    """\
-      ▓▓▓░
-     ▓▒░░░▓
-     ▓◑  ◐▓
-     ▓░▂▂░▓
-     ▓▒░░░▓
-    ▓░ ░ ░░
-   ░░░ ░ ░░░
-  ░░       ░
- ░        ░░
-""",
-    # Frame 3: processing pulse
-    """\
-      ▓▓▓░
-     ▓▒░░░▓
-     ▓◑  ◐▓
-     ▓░──░▓
-     ▓▒░░░▓
-    ▓░   ░░
-   ░░  ░  ░░
-  ░░░░░░░░░
- ░        ░░
-""",
-]
+def _colorize(line: str) -> str:
+    """Apply per-character color codes to a raw mascot line."""
+    out = ""
+    for ch in line:
+        if ch == "✦":
+            out += _BOLD + _GOLD + ch + _RESET
+        elif ch in "●◉":
+            out += _BOLD + _DEEP + ch + _RESET
+        elif ch in "⌣◡":
+            out += _BOLD + _CLAY + ch + _RESET
+        elif ch == "o":                       # alert mouth
+            out += _BOLD + _CLAY + ch + _RESET
+        elif ch in "-^":                       # closed / happy eyes
+            out += _DIM + ch + _RESET
+        elif ch in "╭╮╰╯─│╱╲":                # body outline
+            out += _OUTLINE + ch + _RESET
+        else:
+            out += ch
+    return out
 
 
-def colorize_mascot(art: str, color_scheme: str = "default") -> str:
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def render_mascot(variant: str = "normal", colorized: bool = True) -> str:
     """
-    Apply ANSI color codes to mascot ASCII art.
+    Build the mascot as a multi-line string.
 
     Args:
-        art: Raw ASCII art string
-        color_scheme: "default" (dark/med/tan), "vibrant" (saturated browns), "minimal" (single color)
+        variant:   "normal" | "blink" | "wink" | "happy" | "alert"
+        colorized: embed ANSI color codes when True
 
     Returns:
-        ASCII art with ANSI color codes embedded
+        Multi-line string ready to write to a terminal.
     """
-    if color_scheme == "minimal":
-        # Single dark brown for entire mascot
-        lines = art.split("\n")
-        colored_lines = [COLORS["dark_brown"] + line + COLORS["reset"] for line in lines]
-        return "\n".join(colored_lines)
-
-    # Default: gradient from dark → tan
-    # Map: ▓ = dark, ▒ = medium, ░ = light
-    art = art.replace("▓", COLORS["dark_brown"] + "▓" + COLORS["reset"])
-    art = art.replace("▒", COLORS["medium_brown"] + "▒" + COLORS["reset"])
-    art = art.replace("░", COLORS["tan"] + "░" + COLORS["reset"])
-
-    # Eyes: asymmetrical
-    art = art.replace("●", COLORS["dark_brown"] + "●" + COLORS["reset"])  # filled eye
-    art = art.replace("◯", COLORS["tan"] + "◯" + COLORS["reset"])          # hollow eye
-    art = art.replace("◐", COLORS["medium_brown"] + "◐" + COLORS["reset"])
-    art = art.replace("◑", COLORS["medium_brown"] + "◑" + COLORS["reset"])
-    art = art.replace("◉", COLORS["dark_brown"] + "◉" + COLORS["reset"])
-
-    # Mouth expressions
-    art = art.replace("▀▀", COLORS["tan"] + "▀▀" + COLORS["reset"])
-    art = art.replace("─", COLORS["medium_brown"] + "─" + COLORS["reset"])
-    art = art.replace("╭─", COLORS["tan"] + "╭─" + COLORS["reset"])
-    art = art.replace("▁▁", COLORS["tan"] + "▁▁" + COLORS["reset"])
-    art = art.replace("▲▲", COLORS["dark_brown"] + "▲▲" + COLORS["reset"])
-    art = art.replace("▂▂", COLORS["tan"] + "▂▂" + COLORS["reset"])
-    art = art.replace("──", COLORS["medium_brown"] + "──" + COLORS["reset"])
-
-    return art
+    face = _FACES.get(variant, _FACES["normal"])
+    lines = [row.format(**face) for row in _TEMPLATE]
+    if colorized:
+        lines = [_colorize(l) for l in lines]
+    return "\n".join(lines)
 
 
-def get_mascot_art(state: str = "idle", frame: int = 0, colored: bool = True) -> str:
-    """
-    Get mascot ASCII art for a given state.
-
-    Args:
-        state: "idle", "happy", "alert", "processing"
-        frame: for "processing" state, which animation frame (0-3)
-        colored: whether to apply ANSI color codes
-
-    Returns:
-        ASCII art string, optionally with colors
-    """
-    if state == "idle":
-        art = MASCOT_IDLE
-    elif state == "happy":
-        art = MASCOT_HAPPY
-    elif state == "alert":
-        art = MASCOT_ALERT
-    elif state == "processing":
-        art = MASCOT_PROCESSING[frame % len(MASCOT_PROCESSING)]
+def _write(text: str) -> None:
+    buf = getattr(sys.stdout, "buffer", None)
+    if buf is not None:
+        buf.write((text + "\n").encode("utf-8", errors="replace"))
+        buf.flush()
     else:
-        art = MASCOT_IDLE
-
-    if colored:
-        art = colorize_mascot(art.strip())
-    else:
-        art = art.strip()
-
-    return art
-
-
-def print_mascot(state: str = "idle", frame: int = 0, indent: int = 0) -> None:
-    """
-    Print the mascot to stdout with colors.
-
-    Args:
-        state: "idle", "happy", "alert", "processing"
-        frame: for "processing" state, which animation frame
-        indent: number of spaces to indent the output
-    """
-    art = get_mascot_art(state, frame, colored=True)
-    prefix = " " * indent
-    for line in art.split("\n"):
-        print(prefix + line)
-
-
-def print_mascot_with_text(text: str, state: str = "idle") -> None:
-    """
-    Print mascot alongside text (side-by-side layout).
-
-    Args:
-        text: text to display on the right
-        state: mascot state
-    """
-    art_lines = get_mascot_art(state, colored=True).split("\n")
-    text_lines = text.split("\n")
-
-    # Pad text lines to match art height
-    while len(text_lines) < len(art_lines):
-        text_lines.append("")
-
-    for i, art_line in enumerate(art_lines):
-        text_line = text_lines[i] if i < len(text_lines) else ""
-        # Pad art line to fixed width (to align text)
-        art_padded = art_line.ljust(35)  # adjust based on mascot width
-        print(art_padded + "  " + text_line)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LOADING ANIMATION
-# ─────────────────────────────────────────────────────────────────────────────
-
-def animate_loading(duration_seconds: float = 2.0, text: str = "Espresso brewing…") -> None:
-    """
-    Animate the processing mascot for a loading screen.
-
-    Args:
-        duration_seconds: how long to animate
-        text: status text to display
-    """
-    import time
-    import sys
-
-    start = time.time()
-    frame = 0
-
-    while time.time() - start < duration_seconds:
-        # Clear line and print
-        sys.stdout.write("\r")
+        sys.stdout.write(text + "\n")
         sys.stdout.flush()
 
-        # Print mascot + text
-        art = get_mascot_art("processing", frame=frame, colored=True)
-        lines = art.split("\n")
 
-        if frame == 0:
-            # Print header on first frame
-            print(f"\n{COLORS['dark_brown']}◆ {text}{COLORS['reset']}\n")
+def print_mascot(variant: str = "normal") -> None:
+    """Print the mascot to stdout with ANSI colors."""
+    _write(render_mascot(variant, colorized=True))
 
-        print(lines[min(frame, len(lines) - 1)])
 
-        frame = (frame + 1) % 4
-        time.sleep(0.3)
+def animate_loading(duration_seconds: float = 2.0,
+                    text: str = "Espresso brewing…") -> None:
+    """
+    Blink-loop loading animation: normal → blink → normal → wink → repeat.
+    Clears and redraws in place using ANSI cursor movement.
+    """
+    frames = ["normal", "blink", "normal", "wink"]
+    n_lines = len(_TEMPLATE) + 1  # +1 for the label line
+    start = time.time()
+    idx = 0
 
-    print()  # final newline
+    while time.time() - start < duration_seconds:
+        if idx > 0:
+            sys.stdout.write(f"\033[{n_lines}A\033[0J")
+            sys.stdout.flush()
+        _write(_BOLD + _GOLD + f"  ◆ {text}" + _RESET)
+        _write(render_mascot(frames[idx % len(frames)], colorized=True))
+        idx += 1
+        time.sleep(0.35)
+    print()
 
+
+# ── Demo ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Demo: print all states
-    print("\n" + "=" * 40)
-    print("ESPRESSO PROTOCOL MASCOT GALLERY")
-    print("=" * 40 + "\n")
-
-    states = ["idle", "happy", "alert"]
-    for state in states:
-        print(f"\n[{state.upper()}]")
-        print_mascot(state)
-
-    print(f"\n[PROCESSING] Animation frame 0")
-    print_mascot("processing", frame=0)
-
-    print(f"\n[PROCESSING] Animation frame 2")
-    print_mascot("processing", frame=2)
-
-    # Side-by-side example
-    print("\n" + "=" * 60)
-    print("SIDE-BY-SIDE EXAMPLE")
-    print("=" * 60 + "\n")
-    print_mascot_with_text("Ready to analyze your data.\nAsk a question to begin.", state="happy")
+    div = "─" * 32
+    for v in ("normal", "blink", "wink", "happy", "alert"):
+        print(f"\n{div}\n  {v}\n{div}")
+        print_mascot(v)
+    print(f"\n{div}\n  animate_loading (2s)\n{div}")
+    animate_loading(2.0)

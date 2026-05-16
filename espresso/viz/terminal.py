@@ -40,17 +40,17 @@ console = Console()
 # ◈ — Espresso's pixel-diamond mascot.  Inline symbol throughout.
 MASCOT = "◈"
 
-# Welcome mascot: cute, innocent, playful Espresso spirit.
-# Inspired by Claude Code's geometric sparkle style + Android's round-headed charm.
-# Antennae (curious), big bright eyes (innocent), smile (friendly), arms & legs (playful).
+# Welcome mascot — geometric crystal sprite with sparkle accent and friendly face.
+# 8 lines tall, 7 wide at center.  Warm coffee palette (no literal coffee imagery).
 MASCOT_ART = """\
-        [bold #D4A85A]◆[/bold #D4A85A]    [bold #D4A85A]◆[/bold #D4A85A]
-        [dim #C4A882]│[/dim #C4A882]    [dim #C4A882]│[/dim #C4A882]
-      [bold #6F4E37]◇[/bold #6F4E37]  [bold #6F4E37]◇[/bold #6F4E37]    [bold #6F4E37]◇[/bold #6F4E37]  [bold #6F4E37]◇[/bold #6F4E37]
-        [bold #6F4E37]◆[/bold #6F4E37] [bold #D4A85A]●[/bold #D4A85A] [bold #D4A85A]●[/bold #D4A85A] [bold #6F4E37]◆[/bold #6F4E37]
-        [bold #6F4E37]│[/bold #6F4E37]   [bold #C4A882]⌣[/bold #C4A882]   [bold #6F4E37]│[/bold #6F4E37]
-        [bold #6F4E37]◇[/bold #6F4E37] [bold #6F4E37]◇[/bold #6F4E37] [bold #6F4E37]◇[/bold #6F4E37]
-       [dim #8A5228]╱[/dim #8A5228]       [dim #8A5228]╲[/dim #8A5228]\
+       [bold #E8B863]✦[/bold #E8B863]
+      [#8B6F47]╭─╮[/#8B6F47]
+     [#8B6F47]╱   ╲[/#8B6F47]
+    [#8B6F47]│ [/#8B6F47][bold #6F4E37]●[/bold #6F4E37] [bold #6F4E37]●[/bold #6F4E37][#8B6F47] │[/#8B6F47]
+    [#8B6F47]│  [/#8B6F47][bold #C97D6E]⌣[/bold #C97D6E][#8B6F47]  │[/#8B6F47]
+     [#8B6F47]╲   ╱[/#8B6F47]
+      [#8B6F47]╰─╯[/#8B6F47]
+      [#8B6F47]╱ ╲[/#8B6F47]\
 """
 
 _SPINNER_FRAMES = ["◈", "◉", "◎", "◉"]
