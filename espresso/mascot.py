@@ -1,27 +1,18 @@
 """
-Espresso Protocol Mascot — block-filled, wide, compact.
+Espresso Protocol Mascot.
 
-Solid-block construction (like Claude Code's dense geometric style):
-  ▄███████████▄     <- half-block top cap
-  █  ●     ●  █     <- face with big eyes
-  █  ═══════  █     <- wide smile bar
-  ▀███████████▀     <- half-block bottom cap
-  ▌           ▐     <- stubby feet
-
-5 lines, 13 chars wide. Coffee brown body, gold eyes, amber mouth.
-No tall columns, no outlines — solid filled blocks.
+   ▄▄▄▄▄▄▄▄▄▄▄
+   █  ▀   ▀  █   <- diamond eyes
+   █▄▄▄▄▄▄▄▄▄█
+   ▄█▀█████▀█▄
+ ▄██  █████  ██▄  <- blocky arms
+ ▀▀█  █████  █▀▀
+   █▄▄█   █▄▄█   <- stubby legs
 
 Usage:
-    from espresso.mascot import render_mascot, print_mascot, animate_loading
-
-    print_mascot()           # normal
-    print_mascot("blink")    # blink
-    print_mascot("happy")    # happy
-    animate_loading(2.0)     # blinking loader
-    s = render_mascot()      # returns colorized string
+    from espresso.mascot import print_mascot, render_mascot, animate_loading
 """
 from __future__ import annotations
-
 import sys
 import time
 
@@ -31,74 +22,68 @@ try:
 except ImportError:
     pass
 
-
-# ── ANSI 256 color codes ─────────────────────────────────────────────────────
-_BODY  = "\033[38;5;94m"    # dark coffee brown — body blocks █▄▀▌▐
-_EYE   = "\033[38;5;220m"   # bright gold — eyes ● ◉
-_MOUTH = "\033[38;5;136m"   # amber gold — mouth ═══════
-_DIM   = "\033[38;5;241m"   # mid-grey — closed eyes ─
+_BODY  = "\033[38;5;94m"    # dark coffee brown
+_EYE   = "\033[38;5;220m"   # bright gold  — eye ▀ chars
 _BOLD  = "\033[1m"
 _RESET = "\033[0m"
 
-
-# ── Template rows (each exactly 15 chars with 2-space indent) ─────────────────
-# {L} and {R} = 1 char each (eyes)
-# {M} = 7 chars (mouth)
-
-_ROWS = (
-    "  ▄█████▄",
-    "  █ {L} {R} █",
-    "  ▀█████▀",
-)
-
-_FACES: dict[str, dict[str, str]] = {
-    "normal":     {"L": "◆", "R": "◆"},
-    "blink":      {"L": "·", "R": "·"},
-    "wink":       {"L": "·", "R": "◆"},
-    "happy":      {"L": "◈", "R": "◈"},
-    "alert":      {"L": "◉", "R": "◆"},
-    "processing": {"L": "◈", "R": "·"},
+# Each tuple: (eye_left, eye_right) — single chars
+_EYES = {
+    "normal":     ("▀", "▀"),
+    "blink":      ("▁", "▁"),
+    "wink":       ("▁", "▀"),
+    "alert":      ("▲", "▀"),
+    "processing": ("▀", "▁"),
 }
 
+_HEAD_TOP  = "   ▄▄▄▄▄▄▄▄▄▄▄"
+_HEAD_BOT  = "   █▄▄▄▄▄▄▄▄▄█"
+_BODY_TOP  = "   ▄█▀█████▀█▄"
+_ARM_MID   = " ▄██  █████  ██▄"
+_ARM_BOT   = " ▀▀█  █████  █▀▀"
+_LEGS      = "   █▄▄█   █▄▄█"
 
-# ── Colorizer ─────────────────────────────────────────────────────────────────
 
-def _colorize(line: str) -> str:
-    out = ""
-    for ch in line:
-        if ch in "█▄▀▌▐":
-            out += _BODY + ch + _RESET
-        elif ch in "●◉▲":
-            out += _BOLD + _EYE + ch + _RESET
-        elif ch == "═":
-            out += _MOUTH + ch + _RESET
-        elif ch == "─":                   # closed eye or flat mouth
-            out += _DIM + ch + _RESET
-        else:
-            out += ch
+def _eye_line(l: str, r: str) -> str:
+    return f"   █  {l}   {r}  █"
+
+
+def _colorize(lines: list[str], eye_idx: int) -> list[str]:
+    out = []
+    for i, line in enumerate(lines):
+        result = ""
+        for ch in line:
+            if ch in "█▄":
+                result += _BODY + ch + _RESET
+            elif ch == "▀":
+                result += (_BOLD + _EYE if i == eye_idx else _BODY) + ch + _RESET
+            elif ch in "▁▲":          # closed / alert eye chars
+                result += _BODY + ch + _RESET
+            else:
+                result += ch
+        out.append(result)
     return out
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
-
 def render_mascot(variant: str = "normal", colorized: bool = True) -> str:
-    """
-    Return the mascot as a multi-line string.
-
-    Args:
-        variant:   "normal" | "blink" | "wink" | "happy" | "alert"
-        colorized: embed ANSI color codes when True
-    """
-    face = _FACES.get(variant, _FACES["normal"])
-    lines = [row.format(L=face["L"], R=face["R"]) for row in _ROWS]
+    el, er = _EYES.get(variant, _EYES["normal"])
+    raw = [
+        _HEAD_TOP,
+        _eye_line(el, er),
+        _HEAD_BOT,
+        _BODY_TOP,
+        _ARM_MID,
+        _ARM_BOT,
+        _LEGS,
+    ]
     if colorized:
-        lines = [_colorize(l) for l in lines]
-    return "\n".join(lines)
+        raw = _colorize(raw, eye_idx=1)
+    return "\n".join(raw)
 
 
 def _write(text: str) -> None:
     buf = getattr(sys.stdout, "buffer", None)
-    if buf is not None:
+    if buf:
         buf.write((text + "\n").encode("utf-8", errors="replace"))
         buf.flush()
     else:
@@ -107,33 +92,27 @@ def _write(text: str) -> None:
 
 
 def print_mascot(variant: str = "normal") -> None:
-    """Print mascot to stdout with ANSI colors."""
     _write(render_mascot(variant, colorized=True))
 
 
 def animate_loading(duration_seconds: float = 2.0,
                     text: str = "Espresso brewing…") -> None:
-    """Blinking loading loop: normal → blink → normal → wink, in place."""
     frames = ["normal", "blink", "normal", "wink"]
-    n = len(_ROWS) + 1          # mascot lines + label
+    n = 8   # 7 art lines + 1 label
     start = time.time()
     idx = 0
     while time.time() - start < duration_seconds:
         if idx > 0:
             sys.stdout.write(f"\033[{n}A\033[0J")
             sys.stdout.flush()
-        _write(_BOLD + _MOUTH + f"  ◆ {text}" + _RESET)
+        _write(_BOLD + _EYE + f"  ◆ {text}" + _RESET)
         _write(render_mascot(frames[idx % len(frames)], colorized=True))
         idx += 1
         time.sleep(0.35)
     print()
 
 
-# ── Demo ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    div = "─" * 28
-    for v in ("normal", "blink", "wink", "happy", "alert"):
-        print(f"\n{div}\n  {v}\n{div}")
+    for v in ("normal", "blink", "wink", "alert", "processing"):
+        print(f"\n[{v}]")
         print_mascot(v)
-    print(f"\n{div}\n  animate_loading 2s\n{div}")
-    animate_loading(2.0)
