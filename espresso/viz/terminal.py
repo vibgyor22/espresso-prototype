@@ -40,14 +40,12 @@ console = Console()
 # ◈ — Espresso's pixel-diamond mascot.  Inline symbol throughout.
 MASCOT = "◈"
 
-# Welcome mascot — solid-block face, wide and compact (5 lines, 13 wide).
-# Claude Code-style dense geometry: filled █▄▀ blocks, gold eyes, amber smile.
+# Welcome mascot — small, cute, block-filled. 4 lines × 9 wide.
 MASCOT_ART = """\
-  [bold #6F4E37]▄███████████▄[/bold #6F4E37]
-  [bold #6F4E37]█[/bold #6F4E37]  [bold #E8B863]●[/bold #E8B863]     [bold #E8B863]●[/bold #E8B863]  [bold #6F4E37]█[/bold #6F4E37]
-  [bold #6F4E37]█[/bold #6F4E37]  [#D4A85A]═══════[/#D4A85A]  [bold #6F4E37]█[/bold #6F4E37]
-  [bold #6F4E37]▀███████████▀[/bold #6F4E37]
-  [#6F4E37]▌           ▐[/#6F4E37]\
+  [bold #6F4E37]▄███████▄[/bold #6F4E37]
+  [bold #6F4E37]█[/bold #6F4E37] [bold #E8B863]●[/bold #E8B863]   [bold #E8B863]●[/bold #E8B863] [bold #6F4E37]█[/bold #6F4E37]
+  [bold #6F4E37]█[/bold #6F4E37]   [bold #C97D6E]◡[/bold #C97D6E]   [bold #6F4E37]█[/bold #6F4E37]
+  [bold #6F4E37]▀███████▀[/bold #6F4E37]\
 """
 
 _SPINNER_FRAMES = ["◈", "◉", "◎", "◉"]
