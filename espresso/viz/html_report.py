@@ -1014,59 +1014,87 @@ function gridLines() {{
 }}
 function noLegend() {{ return {{ display: false }}; }}
 
+/* Shared base options — no animation, no resize loops */
+function baseOpts(extra) {{
+  return Object.assign({{
+    animation: false,
+    responsive: false,
+    maintainAspectRatio: false,
+    plugins: {{ legend: noLegend() }},
+  }}, extra || {{}});
+}}
+
 /* ── Build chart zone ── */
 function buildCharts() {{
   const zone = document.getElementById('chartsZone');
   if (!zone) return;
 
+  const SCATTER_H = 200, TS_H = 200, FOREST_H = 80;
+
   const cards = [];
 
   // Scatter chart
   if (HAS_SCATTER && !IS_FORECAST && SCATTER.pts && SCATTER.pts.length > 0) {{
-    cards.push(`<div class="chart-card"><div class="cc-label">Scatter · ${{SCATTER.xLabel}} vs ${{SCATTER.yLabel}}</div><div class="chart-canvas-wrap"><canvas id="chartScatter"></canvas></div></div>`);
+    cards.push(`<div class="chart-card"><div class="cc-label">Scatter · ${{SCATTER.xLabel}} vs ${{SCATTER.yLabel}}</div><div class="chart-canvas-wrap" style="height:${{SCATTER_H}}px"><canvas id="chartScatter"></canvas></div></div>`);
   }}
 
   // Time series OR forecast
   if (IS_FORECAST && FORECAST.histV && FORECAST.histV.length > 0) {{
-    cards.push(`<div class="chart-card"><div class="cc-label">Forecast · ${{FORECAST.label}}</div><div class="chart-canvas-wrap"><canvas id="chartForecast"></canvas></div></div>`);
+    cards.push(`<div class="chart-card"><div class="cc-label">Forecast · ${{FORECAST.label}}</div><div class="chart-canvas-wrap" style="height:${{TS_H}}px"><canvas id="chartForecast"></canvas></div></div>`);
   }} else if (HAS_TS && TS.v && TS.v.length > 0) {{
-    cards.push(`<div class="chart-card"><div class="cc-label">Trend · ${{TS.label}} over time</div><div class="chart-canvas-wrap"><canvas id="chartTS"></canvas></div></div>`);
+    cards.push(`<div class="chart-card"><div class="cc-label">Trend · ${{TS.label}} over time</div><div class="chart-canvas-wrap" style="height:${{TS_H}}px"><canvas id="chartTS"></canvas></div></div>`);
   }}
 
   // Forest / effect chart
   if (!IS_FORECAST) {{
-    cards.push(`<div class="chart-card"><div class="cc-label">Effect · 95% confidence interval</div><div class="chart-canvas-wrap" style="height:90px"><canvas id="chartForest"></canvas></div></div>`);
+    cards.push(`<div class="chart-card"><div class="cc-label">Effect · 95% confidence interval</div><div class="chart-canvas-wrap" style="height:${{FOREST_H}}px"><canvas id="chartForest"></canvas></div></div>`);
   }}
 
   if (cards.length === 0) return;
 
-  // Grid layout
+  // Grid layout — inject HTML first, then wait one frame for layout to settle
   const singleCol = cards.length === 1;
   zone.innerHTML = `<div class="charts-row${{singleCol?' single':''}}" style="margin-bottom:24px">${{cards.join('')}}</div>`;
 
-  // Render each
-  renderScatter();
-  renderTS();
-  renderForecast();
-  renderForest();
+  // requestAnimationFrame ensures the browser has finished laying out the grid
+  // before Chart.js reads element dimensions — prevents the elongation/resize loop
+  requestAnimationFrame(() => {{
+    sizeCanvases();
+    renderScatter();
+    renderTS();
+    renderForecast();
+    renderForest();
+  }});
+}}
+
+/* Set canvas pixel dimensions to match their wrapper before Chart.js touches them */
+function sizeCanvases() {{
+  ['chartScatter','chartTS','chartForecast','chartForest'].forEach(id => {{
+    const el = document.getElementById(id);
+    if (!el) return;
+    const wrap = el.parentElement;
+    if (!wrap) return;
+    const w = wrap.clientWidth || 400;
+    const h = wrap.clientHeight || 200;
+    el.width  = w;
+    el.height = h;
+    el.style.width  = w + 'px';
+    el.style.height = h + 'px';
+  }});
 }}
 
 function renderScatter() {{
   const el = document.getElementById('chartScatter');
   if (!el || !SCATTER.pts || SCATTER.pts.length === 0) return;
 
-  // Unique colors per unit (up to 3 for panel data)
   const unitSet = [...new Set(SCATTER.units || [])].slice(0, 3);
   const unitColors = [C.walnut, C.green, C.gold];
   const ptColor = (i) => {{
     if (!SCATTER.units || SCATTER.units.length === 0) return 'rgba(90,48,24,.35)';
     const u = SCATTER.units[i];
     const idx = unitSet.indexOf(u);
-    const hex = unitColors[idx] || C.walnut;
-    return hex + '55'; // ~33% opacity
+    return (unitColors[idx] || C.walnut) + '55';
   }};
-
-  const scatterData = SCATTER.pts.map((p, i) => ({{ x: p.x, y: p.y, pointBackgroundColor: ptColor(i) }}));
 
   new Chart(el, {{
     type: 'scatter',
@@ -1083,28 +1111,20 @@ function renderScatter() {{
           label: 'Fit',
           data: SCATTER.fit || [],
           type: 'line',
-          borderColor: C.gold,
-          borderWidth: 2,
-          pointRadius: 0,
-          tension: 0,
+          borderColor: C.gold, borderWidth: 2,
+          pointRadius: 0, tension: 0,
         }}
       ]
     }},
-    options: {{
-      responsive: true, maintainAspectRatio: false,
-      plugins: {{ legend: noLegend(), tooltip: {{
-        callbacks: {{
-          label: (ctx) => {{
-            const d = ctx.raw;
-            return `(${{d.x.toFixed(3)}}, ${{d.y.toFixed(3)}})`;
-          }}
-        }}
-      }} }},
+    options: baseOpts({{
+      plugins: {{ legend: noLegend(), tooltip: {{ callbacks: {{
+        label: (ctx) => {{ const d = ctx.raw; return `(${{d.x.toFixed(3)}}, ${{d.y.toFixed(3)}})`; }}
+      }} }} }},
       scales: {{
         x: {{ grid: gridLines(), title: {{ display: true, text: SCATTER.xLabel, color: C.faint }} }},
         y: {{ grid: gridLines(), title: {{ display: true, text: SCATTER.yLabel, color: C.faint }} }},
       }}
-    }}
+    }})
   }});
 }}
 
@@ -1119,23 +1139,18 @@ function renderTS() {{
       datasets: [{{
         label: TS.label,
         data: TS.v,
-        borderColor: C.walnut,
-        backgroundColor: 'rgba(90,48,24,.06)',
-        fill: true,
-        tension: 0.25,
+        borderColor: C.walnut, backgroundColor: 'rgba(90,48,24,.06)',
+        fill: true, tension: 0.25, borderWidth: 2,
         pointRadius: TS.t.length > 80 ? 0 : 3,
         pointBackgroundColor: C.gold,
-        borderWidth: 2,
       }}]
     }},
-    options: {{
-      responsive: true, maintainAspectRatio: false,
-      plugins: {{ legend: noLegend() }},
+    options: baseOpts({{
       scales: {{
         x: {{ grid: gridLines() }},
         y: {{ grid: gridLines() }},
       }}
-    }}
+    }})
   }});
 }}
 
@@ -1143,12 +1158,9 @@ function renderForecast() {{
   const el = document.getElementById('chartForecast');
   if (!el || !FORECAST.histV || FORECAST.histV.length === 0) return;
 
-  const histLabels = FORECAST.histT;
-  const fcLabels   = FORECAST.fcT;
-  const allLabels  = histLabels.concat(fcLabels);
-  const nH = histLabels.length, nF = fcLabels.length;
-  const nullsH = Array(nH).fill(null);
-  const nullsF = Array(nF).fill(null);
+  const allLabels = FORECAST.histT.concat(FORECAST.fcT);
+  const nH = FORECAST.histT.length, nF = FORECAST.fcT.length;
+  const nullsH = Array(nH).fill(null), nullsF = Array(nF).fill(null);
 
   new Chart(el, {{
     type: 'line',
@@ -1158,43 +1170,38 @@ function renderForecast() {{
         {{
           label: 'History',
           data: FORECAST.histV.concat(nullsF),
-          borderColor: C.walnut, borderWidth: 2,
-          fill: false, tension: 0.2,
+          borderColor: C.walnut, borderWidth: 2, fill: false, tension: 0.2,
           pointRadius: nH > 60 ? 0 : 2,
         }},
         {{
           label: 'Forecast',
           data: nullsH.concat(FORECAST.fcV),
-          borderColor: C.goldL, borderWidth: 2,
-          borderDash: [6, 3], fill: false, tension: 0.2,
+          borderColor: C.goldL, borderWidth: 2, borderDash: [6, 3],
+          fill: false, tension: 0.2,
           pointRadius: 3, pointBackgroundColor: C.goldL,
         }},
         ...(FORECAST.fcLo && FORECAST.fcLo.length > 0 ? [
           {{
-            label: '95% CI low',
-            data: nullsH.concat(FORECAST.fcLo),
+            label: '95% lo', data: nullsH.concat(FORECAST.fcLo),
             borderColor: 'rgba(184,134,60,.25)', borderWidth: 1,
             borderDash: [2, 2], fill: false, pointRadius: 0,
           }},
           {{
-            label: '95% CI high',
-            data: nullsH.concat(FORECAST.fcHi),
+            label: '95% hi', data: nullsH.concat(FORECAST.fcHi),
             borderColor: 'rgba(184,134,60,.25)', borderWidth: 1,
             borderDash: [2, 2], fill: '-1',
-            backgroundColor: 'rgba(184,134,60,.05)',
-            pointRadius: 0,
+            backgroundColor: 'rgba(184,134,60,.05)', pointRadius: 0,
           }},
         ] : []),
       ]
     }},
-    options: {{
-      responsive: true, maintainAspectRatio: false,
-      plugins: {{ legend: {{ position: 'bottom', labels: {{ boxWidth: 12 }} }} }},
+    options: baseOpts({{
+      plugins: {{ legend: {{ display: true, position: 'bottom', labels: {{ boxWidth: 10, font: {{ size: 10 }} }} }} }},
       scales: {{
         x: {{ grid: gridLines() }},
         y: {{ grid: gridLines() }},
       }}
-    }}
+    }})
   }});
 }}
 
@@ -1203,46 +1210,26 @@ function renderForest() {{
   if (!el || FOREST.eff === undefined) return;
 
   const passesZero = FOREST.lo < 0 && FOREST.hi > 0;
-  const barColor   = passesZero ? 'rgba(122,96,80,.4)' : (FOREST.eff >= 0 ? 'rgba(45,102,68,.65)' : 'rgba(122,40,40,.65)');
+  const barColor = passesZero ? 'rgba(122,96,80,.45)' : (FOREST.eff >= 0 ? 'rgba(45,102,68,.65)' : 'rgba(122,40,40,.65)');
 
   new Chart(el, {{
     type: 'bar',
     data: {{
       labels: [FOREST.label],
       datasets: [
-        {{
-          label: 'Effect',
-          data: [FOREST.eff],
-          backgroundColor: barColor,
-          borderRadius: 4,
-          barThickness: 24,
-        }},
-        {{
-          label: 'CI low',
-          data: [FOREST.lo],
-          backgroundColor: 'rgba(184,134,60,.3)',
-          borderRadius: 2,
-          barThickness: 8,
-        }},
-        {{
-          label: 'CI high',
-          data: [FOREST.hi],
-          backgroundColor: 'rgba(184,134,60,.3)',
-          borderRadius: 2,
-          barThickness: 8,
-        }},
+        {{ label: 'Effect', data: [FOREST.eff], backgroundColor: barColor, borderRadius: 4, barThickness: 20 }},
+        {{ label: 'CI lo',  data: [FOREST.lo],  backgroundColor: 'rgba(184,134,60,.3)', borderRadius: 2, barThickness: 6 }},
+        {{ label: 'CI hi',  data: [FOREST.hi],  backgroundColor: 'rgba(184,134,60,.3)', borderRadius: 2, barThickness: 6 }},
       ]
     }},
-    options: {{
+    options: baseOpts({{
       indexAxis: 'y',
-      responsive: true, maintainAspectRatio: false,
       plugins: {{
         legend: noLegend(),
-        tooltip: {{
-          callbacks: {{
-            label: (ctx) => {{
-              if (ctx.datasetIndex === 0) return `Effect: ${{FOREST.eff.toFixed(4)}}`;
-              if (ctx.datasetIndex === 1) return `CI low: ${{FOREST.lo.toFixed(4)}}`;
+        tooltip: {{ callbacks: {{
+          label: (ctx) => {{
+            if (ctx.datasetIndex === 0) return `Effect: ${{FOREST.eff.toFixed(4)}}`;
+            if (ctx.datasetIndex === 1) return `CI low: ${{FOREST.lo.toFixed(4)}}`;
               return `CI high: ${{FOREST.hi.toFixed(4)}}`;
             }}
           }}
@@ -1323,14 +1310,12 @@ function initWhatIf() {{
           }}
         ]
       }},
-      options: {{
-        responsive: true, maintainAspectRatio: false,
-        plugins: {{ legend: noLegend() }},
+      options: baseOpts({{
         scales: {{
           x: {{ grid: gridLines(), ticks: {{ maxTicksLimit: 5 }} }},
           y: {{ grid: gridLines(), ticks: {{ maxTicksLimit: 5 }} }},
         }}
-      }}
+      }})
     }});
   }}
 
