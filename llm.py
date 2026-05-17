@@ -326,6 +326,32 @@ def identify_unit_value(unit_description: str, unit_column_name: str, df):
         return None
 
 
+def chat_about_result(question: str, session_context: dict) -> str:
+    """Answer a conversational question about an existing analysis without re-running it."""
+    if BACKEND == "none":
+        return ""
+    ctx = session_context
+    system = (
+        "You are Espresso, an agentic econometric analyst. "
+        "The user just ran an analysis and is chatting about the results. "
+        "Answer in 2–4 sentences. Be precise about numbers from the context. "
+        "Never invent new statistics — only reference what is in the result context. "
+        "If you genuinely cannot answer from context, say so briefly."
+    )
+    result_lines = [
+        f"Model: {ctx.get('model_key', 'unknown')}",
+        f"Outcome: {ctx.get('outcome', '?')}  Treatment/predictor: {ctx.get('treatment', '?')}",
+        f"Effect estimate: {ctx.get('eff', '?')}  p-value: {ctx.get('pval', '?')}  R²: {ctx.get('r2', '?')}",
+        f"N observations: {ctx.get('n_obs', '?')}",
+    ]
+    if ctx.get("verdict"):
+        result_lines.append(f"Verdict: {ctx['verdict']}")
+    if ctx.get("mechanism"):
+        result_lines.append(f"Mechanism: {ctx['mechanism']}")
+    user = "Analysis context:\n" + "\n".join(result_lines) + f"\n\nUser: {question}"
+    return _chat(system=system, user=user, temperature=0.6, max_tokens=400)
+
+
 def query_gemini(prompt: str) -> str:
     """
     Generic prose generation. Name kept for back-compat; routes to whichever

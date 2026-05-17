@@ -45,6 +45,7 @@ from .viz.html_report import create_html_report
 from .viz.table_export import export_table
 from .whatif import simulate as whatif_simulate
 from .glossary import define
+from llm import chat_about_result
 
 
 app = typer.Typer(
@@ -455,28 +456,41 @@ def _run_repl():
             last_followups = list(session.followups or [])
             continue
 
-        # ── natural conversation: any non-command text → run analysis ──
-        # If data is loaded, treat anything as a question.
-        # If data is not loaded yet, prompt to load first.
+        # ── natural conversation: chat about existing result OR run new analysis ──
         if _last_df_holder.get("df"):
-            session = Session()
-            coord = Coordinator(session, clarifier=_rich_clarifier)
-            res_df = _last_df_holder["df"]
-            coord.attach_data(res_df["df"], path=res_df["path"], fmt=res_df["fmt"], sheet=res_df["sheet"])
-            coord.ask(raw)
-            last_followups = list(session.followups or [])
-            if last_followups:
-                chosen = _show_countdown_menu(last_followups)
-                if chosen and 1 <= chosen <= len(last_followups):
-                    picked = last_followups[chosen - 1]
-                    console.print(f"[dim {P['accent']}]→ running:[/dim {P['accent']}]  {picked}")
-                    session = Session()
-                    coord2  = Coordinator(session, clarifier=_rich_clarifier)
-                    res_df2 = _last_df_holder.get("df")
-                    if res_df2:
-                        coord2.attach_data(res_df2["df"], path=res_df2["path"], fmt=res_df2["fmt"], sheet=res_df2["sheet"])
-                    coord2.ask(picked)
-                    last_followups = list(session.followups or [])
+            if not _is_new_analysis_request(raw, session):
+                # User is chatting about the current result — no re-run needed
+                ctx = _session_context_for_chat(session)
+                reply = chat_about_result(raw, ctx)
+                if reply:
+                    console.print(Panel(
+                        reply,
+                        border_style=P["accent"], padding=(0, 2),
+                        title=f"[dim {P['accent']}]espresso[/dim {P['accent']}]",
+                        title_align="left",
+                    ))
+                else:
+                    console.print(f"[dim]Run an analysis first, then ask me anything about the results.[/dim]")
+            else:
+                # Fresh analytical question — spin up a new session and run the pipeline
+                session = Session()
+                coord = Coordinator(session, clarifier=_rich_clarifier)
+                res_df = _last_df_holder["df"]
+                coord.attach_data(res_df["df"], path=res_df["path"], fmt=res_df["fmt"], sheet=res_df["sheet"])
+                coord.ask(raw)
+                last_followups = list(session.followups or [])
+                if last_followups:
+                    chosen = _show_countdown_menu(last_followups)
+                    if chosen and 1 <= chosen <= len(last_followups):
+                        picked = last_followups[chosen - 1]
+                        console.print(f"[dim {P['accent']}]→ running:[/dim {P['accent']}]  {picked}")
+                        session = Session()
+                        coord2  = Coordinator(session, clarifier=_rich_clarifier)
+                        res_df2 = _last_df_holder.get("df")
+                        if res_df2:
+                            coord2.attach_data(res_df2["df"], path=res_df2["path"], fmt=res_df2["fmt"], sheet=res_df2["sheet"])
+                        coord2.ask(picked)
+                        last_followups = list(session.followups or [])
         else:
             console.print(
                 f"  [{P['accent']}]No data loaded yet.[/{P['accent']}]  "
@@ -487,6 +501,60 @@ def _run_repl():
 # We keep the most recently loaded df around so `ask` and follow-ups can reuse
 # it across freshly created sessions.
 _last_df_holder: dict = {}
+
+# ---------------------------------------------------------------------------
+# Conversational chat helpers
+# ---------------------------------------------------------------------------
+
+_ANALYSIS_TRIGGERS = (
+    "what is the effect of", "what's the effect of",
+    "effect of ", "impact of ",
+    "predict ", "forecast ",
+    "relationship between ", "correlation between ",
+    "does ", "is there a ", "how does ",
+    "what drives ", "what causes ",
+    "regress ", "run an analysis", "run analysis",
+)
+
+
+def _is_new_analysis_request(text: str, session) -> bool:
+    """Return True if this looks like a fresh analytical run rather than
+    a conversational question about the existing result."""
+    if not session or not getattr(session, "result", None):
+        return True
+    low = text.lower().strip()
+    # Very short messages are almost always conversational
+    if len(low.split()) <= 5:
+        return False
+    has_trigger = any(t in low for t in _ANALYSIS_TRIGGERS)
+    if not has_trigger:
+        return False
+    # Even with a trigger, if the message names the same outcome+treatment
+    # the user is probably asking about the current result, not starting fresh.
+    intent = getattr(session, "intent", None) or {}
+    outcome = str(intent.get("outcome", "")).lower()
+    treatment = str(intent.get("treatment", "")).lower()
+    if outcome and outcome in low and treatment and treatment in low:
+        return False
+    return True
+
+
+def _session_context_for_chat(session) -> dict:
+    result = session.result or {}
+    intent = session.intent or {}
+    interp = session.interpretation_blocks or {}
+    eff = result.get("treatment_effect", result.get("slope", result.get("effect", "?")))
+    return {
+        "model_key": session.model_key or "unknown",
+        "outcome": intent.get("outcome", "?"),
+        "treatment": intent.get("treatment", "?"),
+        "eff": eff,
+        "pval": result.get("pval", result.get("p_value", "?")),
+        "r2": result.get("r2", "?"),
+        "n_obs": result.get("n_obs", result.get("nobs", "?")),
+        "verdict": getattr(session, "verdict_text", "") or "",
+        "mechanism": interp.get("mechanism", ""),
+    }
 
 
 # ---------------------------------------------------------------------------
