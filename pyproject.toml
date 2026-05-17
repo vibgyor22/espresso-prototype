@@ -42,20 +42,20 @@ dev = ["pytest>=8.0"]
 espresso = "espresso.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/vibgyor22/espresso-protocol"
+Homepage = "https://espressoprotocol.in"
+Repository = "https://github.com/vibgyor22/Espresso-Protocol"
+"Bug Tracker" = "https://github.com/vibgyor22/Espresso-Protocol/issues"
+
+[tool.setuptools.packages.find]
+include = ["espresso*"]
 
 [tool.setuptools]
 py-modules = [
     "data_utils",
     "diagnostics",
-    "html_report",
-    "interpretation",
     "llm",
     "model_specs",
     "models",
     "selector",
     "run_analysis",
 ]
-
-[tool.setuptools.packages.find]
-include = ["espresso*"]

@@ -60,3 +60,13 @@ reports/
 # OS
 Thumbs.db
 .DS_Store
+
+# Claude Code
+.claude/
+
+# Local test outputs / screenshots
+*.png
+*.jpg
+espresso_report_*.html
+espresso_table.*
+docs/test_log_*

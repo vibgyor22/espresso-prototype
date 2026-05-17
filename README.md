@@ -1,103 +1,196 @@
-# Espresso
+<div align="center">
 
-> Agentic econometric analyst for the terminal. Think *Claude Code, but for econometrics*.
+# Espresso Protocol
 
-You bring a question and a data file. Espresso decides which columns to use, which model is appropriate, which pre-analysis diagnostics matter, and what to do when something fails — narrating every choice in plain English you can actually follow. No statistical background required.
+**Your data. A question. Real econometrics — in your terminal.**
+
+[**espressoprotocol.in**](https://espressoprotocol.in) · [Install](#install) · [Quick start](#quick-start) · [What it does](#what-it-does)
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-brown.svg)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-gold.svg)](LICENSE)
+[![Status: Beta](https://img.shields.io/badge/status-beta-orange.svg)]()
+
+</div>
+
+---
+
+## The idea
+
+Most data tools make you do the statistics. Espresso does the statistics *for* you.
+
+You load a spreadsheet, ask a question in plain English, and Espresso figures out the rest: which columns matter, which econometric model is appropriate, whether the model's assumptions hold, and what the numbers actually mean for your question. It narrates every decision in plain English so you can follow along — or override anything.
+
+It is not a chatbot. The numbers are computed by deterministic Python — the same estimators academics use. The AI layer handles the judgment calls: reading your question, matching it to your data, choosing between models, and translating coefficients into human language.
+
+Think of it as a senior statistician who happens to know your dataset.
+
+---
+
+## Install
 
 ```bash
-pip install espresso-protocol
-espresso analyze gdp.csv --question "Did the 2020 stimulus boost employment?"
+pip install git+https://github.com/vibgyor22/Espresso-Protocol.git
 ```
+
+Then add your API key (free tier is enough):
+
+```bash
+# Create a .env file in your working directory:
+echo "ANTHROPIC_API_KEY=your-key-here" > .env
+
+# Or use Gemini instead:
+echo "GEMINI_API_KEY=your-key-here" > .env
+```
+
+Get a free key at [console.anthropic.com](https://console.anthropic.com) (Claude) or [aistudio.google.com](https://aistudio.google.com) (Gemini).
+
+---
+
+## Quick start
+
+```bash
+espresso
+```
+
+That opens the interactive terminal. Then just talk to it:
+
+```
+◈  load my_data.csv
+◈  did the policy change in 2018 affect unemployment?
+◈  what if unemployment were 2% lower?
+◈  export
+```
+
+No quotes. No flags. No commands to memorise.
+
+---
 
 ## What it does
 
-- **Reads your data** — CSV, TSV, Excel (multi-sheet), Parquet. Profiles every column (type, range, missingness, candidate role).
-- **Understands your question** — figures out whether you're asking about a causal effect, a correlation, or a forecast.
-- **Picks the right columns** — matches the words in your question to actual columns, and asks you only if it's genuinely unsure.
-- **Picks the right model** — 15+ econometric methods. Diff-in-differences, panel OLS with TWFE, ARIMA, log-log, quantile regression, more.
-- **Runs pre-analysis diagnostics** — stationarity, parallel trends, heteroscedasticity, autocorrelation, normality. Switches to a corrective model when assumptions fail, and tells you why.
-- **Interprets in plain English** — four layers: *why these columns*, *why this model*, *the numbers*, and the qualitative reading: domain context, past trends in your data, recent events that may have shaped it, what empirical literature usually finds, and a sanity check on sign and magnitude.
-- **Suggests follow-ups** — robustness checks, subset analyses, what-if scenarios — pick by number.
-- **Stays in the terminal by default** — rich tables, ascii forecast charts, coefficient bars. Type `export` to get a self-contained HTML dashboard with what-if sliders.
+**Reads any data format** — CSV, TSV, Excel (multi-sheet), Parquet. Automatically profiles every column: type, range, missing values, which role it likely plays.
 
-The statistics are deterministic. The agent layer decides what to run; the math itself never goes through an LLM.
+**Understands your question** — distinguishes between causal questions ("did X cause Y?"), association questions ("is X related to Y?"), and forecasts ("what will X be next year?").
 
-## Quickstart
+**Picks the right model automatically** — 15+ econometric methods. Difference-in-differences, panel OLS with two-way fixed effects, ARIMA, entity fixed effects, log-log regression, quantile regression, and more. If the first model's assumptions fail, it switches to a corrective one and tells you why.
+
+**Runs diagnostics before trusting the numbers** — heteroscedasticity, autocorrelation, non-normality, parallel trends. Applies robust or clustered standard errors as appropriate.
+
+**Interprets in plain English** — four layers of context: why these columns, why this model, what the numbers mean, and the qualitative read: domain knowledge, trends in your actual data, what empirical literature usually finds, a sanity check on sign and magnitude.
+
+**Suggests follow-ups** — robustness checks, subset analyses, what-if scenarios. Pick by number.
+
+**Stays in the terminal by default** — rich formatted tables, coefficient bars, ASCII charts. Type `export` to get a self-contained interactive HTML dashboard with sliders.
+
+The statistics are deterministic. The math never goes through an LLM.
+
+---
+
+## Two ways to use it
+
+### Interactive REPL (recommended)
 
 ```bash
-# One-shot
-espresso analyze data.csv -q "What's the effect of minimum wage on employment?"
-
-# With an HTML dashboard
-espresso analyze data.csv -q "Forecast unemployment for 10 years" --export report.html
-
-# Interactive REPL
 espresso
-[espresso] » load data/test_panel.csv
-[espresso] » did the policy work?
-[espresso] » what if treatment = 12
-[espresso] » ?p-value
-[espresso] » export
 ```
 
-## Why not ChatGPT?
+```
+◈  load gdp_data.csv
+◈  how does trade openness affect GDP growth?
+◈  is that a big effect compared to what the literature finds?
+◈  what if trade openness were 10 percentage points higher?
+◈  export
+```
 
-ChatGPT will tell you *about* difference-in-differences. Espresso *runs* difference-in-differences on your data, *checks the assumptions*, *switches to a more robust estimator* if pre-trends fail, *tells you whether the magnitude is plausible* given what the literature finds, *flags omitted-variable bias when the sign looks weird*, and produces numbers you can trust because the math is deterministic Python, not an LLM hallucinating a p-value.
+After each analysis you can keep chatting. Ask follow-up questions about the result, run what-if scenarios, request robustness checks — no need to re-run anything.
 
-If you want a senior statistician sitting next to you who happens to know your dataset and a thousand papers — that's the goal.
-
-## REPL commands
-
-| Command | What it does |
-|---|---|
-| `load <path>` | Load a CSV / TSV / XLSX / Parquet file |
-| `ask <question>` | Run an analysis (also: just type a question) |
-| `what if <var> = <n>` | Predict outcome at a scenario value |
-| `what if shock = <n>` | Forecast: shift the most recent value |
-| `?<term>` | Define a term (e.g. `?p-value`, `?fixed effects`) |
-| `show profile` / `show interpretation` | Re-print sections |
-| `export [path.html]` | Save a self-contained dashboard |
-| `<number>` | Pick a suggested follow-up |
-
-## Expert overrides
-
-Most of the time you don't need these. When you do:
+### One-shot command
 
 ```bash
+espresso analyze data.csv -q "What drove unemployment in the 2008 recession?"
+```
+
+```bash
+# With HTML export
+espresso analyze data.csv -q "Forecast inflation for the next 5 years" --export report.html
+
+# With explicit column overrides
 espresso analyze data.csv -q "..." \
-  --outcome gdp_per_capita --treatment policy \
-  --unit country --time year \
-  --model diff_in_diff --level expert --no-clarify
+  --outcome gdp_growth --treatment interest_rate \
+  --model diff_in_diff --unit country --time year
 ```
 
-## Setup
+---
 
-```bash
-git clone https://github.com/vibgyor22/espresso-protocol
-cd espresso-protocol
-pip install -e .
-echo "GEMINI_API_KEY=your_key" > .env
-```
+## REPL reference
 
-Espresso uses Gemini for question parsing, column mapping, and qualitative interpretation. If the LLM is offline or out of quota, the deterministic fallbacks still produce a complete analysis — just with less qualitative narration.
+| What you type | What happens |
+|---|---|
+| `load path/to/file.csv` | Load a dataset (CSV, Excel, Parquet) |
+| Any question | Run a full econometric analysis |
+| A number (e.g. `2`) | Run the suggested follow-up |
+| `what if <var> = <value>` | Predict outcome at a scenario value |
+| `what if shock = <n>` | Shift a forecast baseline |
+| `export` | Save a self-contained HTML dashboard |
+| `export table` | Export a LaTeX + Markdown regression table |
+| `eras` | Break down results by historical era |
+| `context` | Show relevant world events for this analysis |
+| `robustness` | Run alternative model specifications |
+| `verdict` | Re-print the plain-English conclusion |
+| `?p-value`, `?fixed effects` | Define any statistical term |
+| `show profile` | Re-print the data profile |
+| `explain` | Toggle step-by-step annotation mode |
+
+---
 
 ## Supported models
 
-**Causal:** difference-in-differences (TWFE).
-**Forecasting:** ARIMA (auto-order), linear trend, exponential smoothing, random walk.
-**Association:** panel OLS (TWFE), entity FE, time FE, first-difference, OLS, pooled OLS, log-linear, log-log, polynomial OLS, median quantile regression.
+| Type | Models |
+|---|---|
+| **Causal** | Difference-in-differences (TWFE) |
+| **Forecast** | ARIMA (auto-order), linear trend, exponential smoothing, random walk |
+| **Association** | Panel OLS (TWFE), entity FE, time FE, first-difference, OLS, pooled OLS, log-linear, log-log, polynomial OLS, median/quantile regression |
 
-All regression models use robust or clustered standard errors as appropriate.
+All regression models apply robust (HC1) or clustered standard errors automatically.
 
-## Documentation
+---
 
-- [Usage and commands](docs/USAGE.md)
-- [Worked examples](docs/EXAMPLES.md)
+## Data formats
 
-## License
+Espresso reads:
 
-MIT.
+- **CSV / TSV** — any delimiter, auto-detected
+- **Excel** — `.xlsx`, multi-sheet (you pick the sheet in the REPL)
+- **Parquet** — full support
+- **Panel data** — unit × time structure auto-detected
+- **Cross-sectional** — single-period data
+- **Time series** — single-entity with a time column
 
-## Status
+---
 
-Beta. The CLI surface is stable; the Python API may move.
+## What you need
+
+- Python 3.10 or later
+- An API key from Anthropic or Google (free tier works fine)
+- A data file with at least two numeric columns
+
+Espresso runs fully offline if no API key is set — you get deterministic statistics but no qualitative interpretation.
+
+---
+
+## Why not just use Python / R / Excel?
+
+Python and R are powerful but require you to already know which model to use, how to run diagnostics, what the assumptions are, how to interpret the output, and what to do when something fails. Excel can't run any of this.
+
+Espresso handles all of that. The model selection, the diagnostics, the interpretation, the fallback logic — it is the analysis layer, not just the calculation layer. You focus on the question; Espresso handles the methodology.
+
+It is not a replacement for statisticians. It is what you reach for before you need one.
+
+---
+
+## Project
+
+**Website:** [espressoprotocol.in](https://espressoprotocol.in)
+**Status:** Beta — CLI is stable, Python API may change
+**License:** MIT
+
+Contributions welcome. Open an issue or PR.
