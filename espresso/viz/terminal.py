@@ -55,6 +55,45 @@ _SPINNER_FRAMES = ["◈", "◉", "◎", "◉"]
 
 
 # ---------------------------------------------------------------------------
+# Number formatting
+# ---------------------------------------------------------------------------
+
+def fmt_coef(x, signed=True) -> str:
+    """Format a coefficient intelligently: decimal for normal-sized numbers,
+    scientific notation for anything outside [0.001, 9999]."""
+    if x is None:
+        return "?"
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    if x == 0.0:
+        return "+0.0000" if signed else "0.0000"
+    prefix = "+" if signed and x > 0 else ""
+    abs_x = abs(x)
+    if 0.001 <= abs_x < 10000:
+        return f"{prefix}{x:,.4f}"
+    # Scientific notation for very small or very large values
+    return f"{prefix}{x:.4e}"
+
+
+def fmt_ci(lo, hi) -> str:
+    """Format a confidence interval pair."""
+    def _f(v):
+        if v is None:
+            return "?"
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return str(v)
+        abs_v = abs(v)
+        if abs_v == 0 or 0.001 <= abs_v < 10000:
+            return f"{v:,.3f}"
+        return f"{v:.3e}"
+    return f"[{_f(lo)},  {_f(hi)}]"
+
+
+# ---------------------------------------------------------------------------
 # Color palette
 # ---------------------------------------------------------------------------
 
@@ -613,8 +652,8 @@ def render_key_number_panel(result: dict, intent: dict, score: dict) -> None:
     sig_star = "★★★" if pval < 0.001 else "★★" if pval < 0.01 else "★" if pval < 0.05 else "n.s."
     border_col = P["success"] if pval < 0.05 else (P["warning"] if pval < 0.10 else P["neutral"])
 
-    number_line = f"[bold {P['brand']}]{eff:+.4f}[/bold {P['brand']}]"
-    ci_line = f"[dim]95% CI  [{ci_lo:.3f},  {ci_hi:.3f}][/dim]"
+    number_line = f"[bold {P['brand']}]{fmt_coef(eff)}[/bold {P['brand']}]"
+    ci_line = f"[dim]95% CI  {fmt_ci(ci_lo, ci_hi)}[/dim]"
     p_line = f"[dim]p = {pval:.4f}  {sig_star}   ·   N = {n:,}[/dim]"
     rel_line = f"[dim {P['accent']}]{treatment}  →  {outcome}[/dim {P['accent']}]"
     score_line = (
@@ -770,7 +809,7 @@ def render_regression(model_key: str, result: dict, intent: dict,
 
     # Log KEY result to the console log
     _shared_log.emit("KEY",
-        f"β̂ = {eff:+.4f}  ·  CI [{ci_lo:.3f}, {ci_hi:.3f}]  ·  p = {pval:.4f}  {sig_star}")
+        f"β̂ = {fmt_coef(eff)}  ·  CI {fmt_ci(ci_lo, ci_hi)}  ·  p = {pval:.4f}  {sig_star}")
     _shared_log.emit("FIT",
         f"R² = {r2:.4f}  ·  N = {n:,}" + (f"  ·  FE = {fe}" if fe else ""))
 
@@ -778,8 +817,8 @@ def render_regression(model_key: str, result: dict, intent: dict,
               title=f"  {result.get('model', model_key)}", title_style="bold", title_justify="left")
     t.add_column("", style="dim")
     t.add_column("", style="bold")
-    t.add_row("coef", f"{eff:+,.4f}")
-    t.add_row("95% CI", f"[{ci_lo:,.3f},  {ci_hi:,.3f}]")
+    t.add_row("coef", fmt_coef(eff))
+    t.add_row("95% CI", fmt_ci(ci_lo, ci_hi))
     t.add_row("p-value", f"[{p_color}]{pval:.4f}  {sig_star}[/{p_color}]")
     t.add_row("R²", f"{r2:.4f}  [dim]({r2*100:.1f}% variance explained)[/dim]")
     t.add_row("N", f"{n:,}")
@@ -1478,10 +1517,10 @@ def render_animated_result(result: dict, score: dict, intent: dict) -> None:
                 bar = (f"[{P['brand']}]{'█' * filled}[/{P['brand']}]"
                        f"[dim]{'░' * (BAR - filled)}[/dim]")
                 live.update(Text.from_markup(
-                    f"  [{P['brand']}]β̂[/{P['brand']}] = [{P['brand']}]{eff:+.4f}[/{P['brand']}]"
+                    f"  [{P['brand']}]β̂[/{P['brand']}] = [{P['brand']}]{fmt_coef(eff)}[/{P['brand']}]"
                     f"  [{p_color}]{sig_star}[/{p_color}]"
                     f"  {bar}"
-                    f"  [{P['accent']}][{ci_lo:.3f}, {ci_hi:.3f}][/{P['accent']}]"
+                    f"  [{P['accent']}]{fmt_ci(ci_lo, ci_hi)}[/{P['accent']}]"
                 ))
                 time.sleep(0.025)
 
@@ -1489,10 +1528,10 @@ def render_animated_result(result: dict, score: dict, intent: dict) -> None:
         bar_final = (f"[{P['brand']}]{'█' * ci_fill}[/{P['brand']}]"
                      f"[dim]{'░' * (BAR - ci_fill)}[/dim]")
         console.print(
-            f"  [{P['brand']}]β̂[/{P['brand']}] = [{P['brand']}]{eff:+.4f}[/{P['brand']}]"
+            f"  [{P['brand']}]β̂[/{P['brand']}] = [{P['brand']}]{fmt_coef(eff)}[/{P['brand']}]"
             f"  [{p_color}]{sig_star}[/{p_color}]"
             f"  {bar_final}"
-            f"  [{P['accent']}][{ci_lo:.3f}, {ci_hi:.3f}][/{P['accent']}]"
+            f"  [{P['accent']}]{fmt_ci(ci_lo, ci_hi)}[/{P['accent']}]"
             f"  [dim]p={pval:.4f}  N={n:,}[/dim]"
         )
 

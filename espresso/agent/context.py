@@ -699,7 +699,31 @@ def compute_proactive_insights(df: pd.DataFrame, result: dict, intent: dict,
             except Exception:
                 pass
 
-        # 6) Data quality / no-signal warning
+        # 6) Scale mismatch — coefficient looks like zero because units differ by orders of magnitude
+        if treatment and outcome and treatment in df.columns and outcome in df.columns:
+            try:
+                import numpy as _np
+                tv = pd.to_numeric(df[treatment], errors="coerce").dropna()
+                ov = pd.to_numeric(df[outcome], errors="coerce").dropna()
+                if len(tv) >= 5 and len(ov) >= 5:
+                    scale_ratio = abs(tv.mean()) / (abs(ov.mean()) or 1)
+                    abs_eff = abs(eff)
+                    if scale_ratio > 1000 and abs_eff < 1e-3:
+                        insights.append({
+                            "icon": "⚠", "color": P_WARNING,
+                            "heading": f"Scale mismatch: {treatment} is ~{scale_ratio:,.0f}× larger than {outcome}",
+                            "body": (
+                                f"{treatment} has mean {tv.mean():.3g} vs {outcome} mean {ov.mean():.3g}. "
+                                "The coefficient looks like zero because one unit of change in the predictor "
+                                "is enormous relative to the outcome. "
+                                "Consider standardizing both variables (z-score) or using log transforms "
+                                "before re-running to get an interpretable effect size."
+                            ),
+                        })
+            except Exception:
+                pass
+
+        # 7) Data quality / no-signal warning
         r2_result = result.get("r_squared", 0) or 0
         pval_result = result.get("pvalue", result.get("p_value", 1)) or 1
         if r2_result < 0.005 and pval_result > 0.4 and n > 200:
@@ -734,7 +758,7 @@ def compute_proactive_insights(df: pd.DataFrame, result: dict, intent: dict,
     except Exception:
         pass
 
-    return insights[:5]  # cap at 5 insights
+    return insights[:6]  # cap at 6 insights
 
 
 # ---------------------------------------------------------------------------
