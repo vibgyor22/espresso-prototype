@@ -506,36 +506,44 @@ _last_df_holder: dict = {}
 # Conversational chat helpers
 # ---------------------------------------------------------------------------
 
-_ANALYSIS_TRIGGERS = (
-    "what is the effect of", "what's the effect of",
-    "effect of ", "impact of ",
-    "predict ", "forecast ",
-    "relationship between ", "correlation between ",
-    "does ", "is there a ", "how does ",
-    "what drives ", "what causes ",
-    "regress ", "run an analysis", "run analysis",
+# Phrases that clearly refer backward to an existing result on screen.
+# Anything matching these is conversational; everything else is a new analysis.
+_RESULT_BACKREFS = (
+    "that result", "this result", "the result",
+    "your estimate", "the estimate", "the coefficient",
+    "what you found", "what you showed", "you found",
+    "the finding", "that finding", "this finding",
+    "the r²", "the p-value", "the effect you",
+    "your analysis", "this analysis",
+    "what does that", "what does this",
+    "why did that", "why is that", "why is this",
+    "explain that", "explain this",
+    "so that means", "so this means", "does that mean",
+    "tell me more about that", "tell me more about this",
+    "so basically", "so essentially",
+    "makes sense", "i see", "interesting,",
 )
 
 
 def _is_new_analysis_request(text: str, session) -> bool:
-    """Return True if this looks like a fresh analytical run rather than
-    a conversational question about the existing result."""
+    """Return True if this should spin up a new analysis pipeline.
+
+    Rule: treat as conversational ONLY when the message clearly references
+    the existing result (backward-looking pronouns / result terms).
+    Everything else with data loaded goes to the pipeline — it is far less
+    disruptive to run an analysis that returns a quick answer than to
+    silently refuse to engage with a new question.
+    """
     if not session or not getattr(session, "result", None):
         return True
     low = text.lower().strip()
-    # Very short messages are almost always conversational
-    if len(low.split()) <= 5:
+    # 4-words-or-fewer → almost certainly a reaction, not a new question
+    if len(low.split()) <= 4:
         return False
-    has_trigger = any(t in low for t in _ANALYSIS_TRIGGERS)
-    if not has_trigger:
+    # Explicit backward reference to the result on screen → conversational
+    if any(ref in low for ref in _RESULT_BACKREFS):
         return False
-    # Even with a trigger, if the message names the same outcome+treatment
-    # the user is probably asking about the current result, not starting fresh.
-    intent = getattr(session, "intent", None) or {}
-    outcome = str(intent.get("outcome", "")).lower()
-    treatment = str(intent.get("treatment", "")).lower()
-    if outcome and outcome in low and treatment and treatment in low:
-        return False
+    # Everything else → new analysis
     return True
 
 
