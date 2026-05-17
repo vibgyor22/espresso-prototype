@@ -723,7 +723,33 @@ def compute_proactive_insights(df: pd.DataFrame, result: dict, intent: dict,
             except Exception:
                 pass
 
-        # 7) Data quality / no-signal warning
+        # 7) Mixed-frequency detection (daily stock data + macro = near-zero R² expected)
+        if time_col and time_col in df.columns:
+            try:
+                time_vals = pd.to_datetime(df[time_col], errors="coerce").dropna()
+                if len(time_vals) > 50:
+                    diffs = time_vals.sort_values().diff().dropna()
+                    median_gap = diffs.median()
+                    # Daily-ish = < 5 days; macro typically >= 30 days
+                    has_daily = median_gap.days <= 5 if hasattr(median_gap, 'days') else False
+                    # Check if any numeric col looks like GDP/inflation/unemployment (macro)
+                    macro_hints = ("gdp", "inflation", "unemployment", "cpi", "rate", "growth")
+                    has_macro = any(any(h in c.lower() for h in macro_hints) for c in df.columns)
+                    if has_daily and has_macro and (result.get("r_squared") or 0) < 0.01:
+                        insights.append({
+                            "icon": "⚠", "color": P_WARNING,
+                            "heading": "Mixed data frequencies detected",
+                            "body": (
+                                "Daily stock data is mixed with macro indicators (quarterly/annual). "
+                                "Correlating them row-by-row produces near-zero R² because the timescales don't match. "
+                                "Try aggregating daily prices to monthly/annual averages, or computing daily returns "
+                                "and testing against daily macro surprises."
+                            ),
+                        })
+            except Exception:
+                pass
+
+        # 8) Data quality / no-signal warning
         r2_result = result.get("r_squared", 0) or 0
         pval_result = result.get("pvalue", result.get("p_value", 1)) or 1
         if r2_result < 0.005 and pval_result > 0.4 and n > 200:
@@ -731,15 +757,15 @@ def compute_proactive_insights(df: pd.DataFrame, result: dict, intent: dict,
                 "icon": "⚠", "color": P_WARNING,
                 "heading": "No detectable signal found",
                 "body": (
-                    f"R²={r2_result:.3f} and p={pval_result:.2f} on {n:,} observations — "
+                    f"R²={r2_result:.2e} and p={pval_result:.2f} on {n:,} observations — "
                     "these variables appear unrelated in this dataset. "
                     "Possible causes: (1) price-level columns instead of returns, "
-                    "(2) synthetic/random data, (3) wrong column match, "
+                    "(2) mixed data frequencies, (3) wrong column match, "
                     "(4) the effect exists but requires different controls or subsamples."
                 ),
             })
 
-        # 7) Low treatment variation warning
+        # 9) Low treatment variation warning
         if treatment and treatment in df.columns:
             try:
                 tv = pd.to_numeric(df[treatment], errors="coerce").dropna()
@@ -758,7 +784,7 @@ def compute_proactive_insights(df: pd.DataFrame, result: dict, intent: dict,
     except Exception:
         pass
 
-    return insights[:6]  # cap at 6 insights
+    return insights[:7]  # cap at 7 insights
 
 
 # ---------------------------------------------------------------------------

@@ -77,6 +77,22 @@ def fmt_coef(x, signed=True) -> str:
     return f"{prefix}{x:.4e}"
 
 
+def fmt_r2(r2) -> str:
+    """Format R² so it never silently rounds to 0.000."""
+    if r2 is None:
+        return "?"
+    try:
+        r2 = float(r2)
+    except (TypeError, ValueError):
+        return str(r2)
+    if r2 >= 0.001:
+        pct = f"{r2 * 100:.1f}%"
+        return f"{r2:.4f}  ({pct} variance explained)"
+    if r2 > 0:
+        return f"{r2:.2e}  ({r2 * 100:.3f}% variance explained)"
+    return "0.0000  (0.0% variance explained)"
+
+
 def fmt_ci(lo, hi) -> str:
     """Format a confidence interval pair."""
     def _f(v):
@@ -708,7 +724,8 @@ def render_significance_meter(result: dict, score: dict) -> None:
     console.print(f"  [dim {P['accent']}]Significance meter[/dim {P['accent']}]")
     console.print(f"  [dim]Evidence strength  [/dim]{_block_bar(p_fill, 30, p_color)}  [dim]p={pval:.3f}[/dim]")
     console.print(f"  [dim]CI precision       [/dim]{_block_bar(max(0, ci_fill), 30)}  [dim]CI width={ci_width:.3g}[/dim]")
-    console.print(f"  [dim]Variance explained [/dim]{_block_bar(r2_fill, 30)}  [dim]R²={r2:.3f}[/dim]")
+    r2_disp = f"{r2:.4f}" if r2 >= 0.001 else (f"{r2:.2e}" if r2 > 0 else "0.0000")
+    console.print(f"  [dim]Variance explained [/dim]{_block_bar(r2_fill, 30)}  [dim]R²={r2_disp}[/dim]")
     console.print(f"  [dim]Confidence score   [/dim]{_block_bar(cs_fill, 30, score['color'])}  [{score['color']}]{score['score']}/100[/{score['color']}]")
     console.print()
 
@@ -810,8 +827,9 @@ def render_regression(model_key: str, result: dict, intent: dict,
     # Log KEY result to the console log
     _shared_log.emit("KEY",
         f"β̂ = {fmt_coef(eff)}  ·  CI {fmt_ci(ci_lo, ci_hi)}  ·  p = {pval:.4f}  {sig_star}")
+    r2_disp = f"{r2:.4f}" if r2 >= 0.001 else (f"{r2:.2e}" if r2 > 0 else "0.0000")
     _shared_log.emit("FIT",
-        f"R² = {r2:.4f}  ·  N = {n:,}" + (f"  ·  FE = {fe}" if fe else ""))
+        f"R² = {r2_disp}  ·  N = {n:,}" + (f"  ·  FE = {fe}" if fe else ""))
 
     t = Table(box=box.SIMPLE, header_style=f"bold {P['primary']}", show_lines=False,
               title=f"  {result.get('model', model_key)}", title_style="bold", title_justify="left")
@@ -820,7 +838,7 @@ def render_regression(model_key: str, result: dict, intent: dict,
     t.add_row("coef", fmt_coef(eff))
     t.add_row("95% CI", fmt_ci(ci_lo, ci_hi))
     t.add_row("p-value", f"[{p_color}]{pval:.4f}  {sig_star}[/{p_color}]")
-    t.add_row("R²", f"{r2:.4f}  [dim]({r2*100:.1f}% variance explained)[/dim]")
+    t.add_row("R²", f"[dim]{fmt_r2(r2)}[/dim]")
     t.add_row("N", f"{n:,}")
     if fe:
         t.add_row("FE", fe)
