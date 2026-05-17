@@ -251,6 +251,19 @@ def context_interpret(
         or result.get("effect")
         or (result.get("forecasts", [None])[0] if result.get("forecasts") else None)
     )
+    def _ci_scalar(v, default=0.0):
+        """Extract a scalar float from a CI value that may be a list (ARIMA returns lists)."""
+        if v is None:
+            return None
+        if isinstance(v, (list, tuple)):
+            v = v[0] if v else default
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    ci_lo_val = _ci_scalar(result.get("ci_lower"))
+    ci_hi_val = _ci_scalar(result.get("ci_upper"))
     repl = {
         "__OUTCOME__": str(outcome),
         "__TREATMENT__": str(treatment or "(none)"),
@@ -260,8 +273,8 @@ def context_interpret(
         "__MODEL__": str(model),
         "__ESTIMATE__": f"{estimate:.4f}" if isinstance(estimate, (int, float)) else str(estimate),
         "__SE__": f"{(result.get('se') or 0):.4f}",
-        "__CI_LO__": f"{result.get('ci_lower', 0):.4f}" if result.get("ci_lower") is not None else "?",
-        "__CI_HI__": f"{result.get('ci_upper', 0):.4f}" if result.get("ci_upper") is not None else "?",
+        "__CI_LO__": f"{ci_lo_val:.4f}" if ci_lo_val is not None else "?",
+        "__CI_HI__": f"{ci_hi_val:.4f}" if ci_hi_val is not None else "?",
         "__PVAL__": f"{(result.get('pvalue', result.get('p_value', 1)) or 1):.4f}",
         "__HISTORICAL_SUMMARY__": str(historical_summary or "(not provided)"),
     }
@@ -421,11 +434,72 @@ def deep_analysis(*, question: str, outcome: str, treatment: str, domain: str,
     return _fallback_deep_analysis(outcome, treatment, estimate, pvalue, ci_lo, ci_hi, r2, n_obs, domain)
 
 
+_DOMAIN_MECHANISMS = {
+    "finance": (
+        "In finance, equity prices and returns are driven by expectations about future cash flows "
+        "and the discount rate. {treatment} affects {outcome} primarily through changes in risk "
+        "appetite, liquidity conditions, and investor sentiment — effects tend to be non-linear "
+        "and regime-dependent (bull vs bear markets). Note: using price *levels* as the outcome "
+        "is problematic because they trend; use percentage returns (Δlog price) for a valid test."
+    ),
+    "macroeconomics": (
+        "{treatment} affects {outcome} via aggregate demand and supply channels — typically through "
+        "investment decisions, consumer confidence, and the credit channel. Transmission lags are "
+        "usually 2–6 quarters. Confounders include monetary policy stance, global commodity prices, "
+        "and fiscal shocks that co-move with both variables."
+    ),
+    "labor economics": (
+        "{treatment} affects {outcome} through labor demand and wage-setting mechanisms. "
+        "Search-and-matching models predict adjustment lags of 3–9 months. Key confounders: "
+        "sectoral composition shifts, automation, and cyclical aggregate demand that drive both "
+        "employment and wages simultaneously."
+    ),
+    "housing": (
+        "{treatment} affects {outcome} through affordability and credit access channels. "
+        "Housing markets are thin and geographically segmented — aggregate effects mask wide "
+        "city-level heterogeneity. Interest rate changes, supply constraints, and demographic "
+        "demand shifts are the dominant confounders."
+    ),
+    "climate / environment": (
+        "{treatment} affects {outcome} via direct physical channels and through price signals "
+        "that alter technology adoption and energy mix. Long-run elasticities differ substantially "
+        "from short-run. Confounders: GDP growth (drives both emissions and adaptation), energy "
+        "price shocks, and policy regime changes."
+    ),
+    "international trade": (
+        "{treatment} affects {outcome} via comparative advantage, supply-chain integration, and "
+        "factor market adjustment. Trade shocks take 2–5 years to fully transmit through labor "
+        "markets. Key confounders: exchange rate movements, global demand cycles, and tariff regimes."
+    ),
+}
+
+
+def _mechanism_text(treatment: str, outcome: str, domain: str) -> str:
+    tmpl = _DOMAIN_MECHANISMS.get(domain)
+    if tmpl:
+        return tmpl.format(treatment=treatment or "the predictor", outcome=outcome or "the outcome")
+    return (
+        f"{treatment or 'The predictor'} and {outcome or 'the outcome'} are linked through "
+        "multiple transmission channels — direct effects, indirect effects through correlated "
+        "variables, and equilibrium adjustments. The single-variable regression captures only "
+        "the reduced-form correlation; confounders correlated with both could bias the estimate."
+    )
+
+
 def _fallback_deep_analysis(outcome: str, treatment: str, estimate: float, pvalue: float,
                               ci_lo: float, ci_hi: float, r2: float, n_obs: int, domain: str) -> str:
     direction = "rise" if estimate > 0 else "fall"
     ci_dir = "rules out zero" if (ci_lo > 0 or ci_hi < 0) else "spans zero"
     certainty = "high" if pvalue < 0.05 else ("moderate" if pvalue < 0.10 else "low")
+    mech = _mechanism_text(treatment, outcome, domain or "")
+
+    heterogeneity_hint = ""
+    if domain == "finance":
+        heterogeneity_hint = "- Split by market regime (expansion vs contraction) or crisis period for conditional effects.\n"
+    elif domain in ("macroeconomics", "labor economics"):
+        heterogeneity_hint = "- Split by business cycle phase (expansion vs recession) to test asymmetric effects.\n"
+    else:
+        heterogeneity_hint = "- Average effect may mask heterogeneity — try splitting by subgroup or era.\n"
 
     return (
         f"**Magnitude**\n"
@@ -433,11 +507,10 @@ def _fallback_deep_analysis(outcome: str, treatment: str, estimate: float, pvalu
         f"- CI [{ci_lo:.2f}, {ci_hi:.2f}] {ci_dir}; certainty is {certainty} (p={pvalue:.3f}).\n"
         f"\n"
         f"**Mechanism**\n"
-        f"- In {domain}, {treatment} typically affects {outcome} via demand/supply channels.\n"
-        f"- Plausible confounders: macro cycles, institutional factors, measurement timing.\n"
+        f"- {mech}\n"
         f"\n"
         f"**What you didn't ask**\n"
-        f"- Average effect may mask heterogeneity — try splitting by subgroup or era.\n"
+        f"{heterogeneity_hint}"
         f"- Model captures only {r2*100:.1f}% of variation; other drivers likely matter more.\n"
         f"\n"
         f"**Threats to validity**\n"
@@ -584,48 +657,65 @@ def compute_proactive_insights(df: pd.DataFrame, result: dict, intent: dict,
                              "Consider including it as a control or running a separate analysis."),
                 })
 
-        # 5) Non-linearity hint (compare linear R² vs quadratic R²)
+        # 5) Non-linearity hint (compare linear R² vs quadratic R² via proper OLS)
         if treatment and outcome and treatment in df.columns and outcome in df.columns:
             try:
                 x = pd.to_numeric(df[treatment], errors="coerce")
                 y = pd.to_numeric(df[outcome],   errors="coerce")
                 valid = pd.concat([x, y], axis=1).dropna()
-                if len(valid) >= 10:
+                if len(valid) >= 15:
+                    import numpy as _np
                     xv = valid.iloc[:, 0].values
                     yv = valid.iloc[:, 1].values
-                    # Linear R²
-                    xm = xv.mean()
-                    lin_pred = xm + (eff * (xv - xm))
-                    ss_res_lin = ((yv - lin_pred) ** 2).sum()
-                    ss_tot = ((yv - yv.mean()) ** 2).sum() or 1
-                    r2_lin = 1 - ss_res_lin / ss_tot
-                    # Quadratic R² (simple, no numpy poly needed)
-                    x2 = (xv - xm) ** 2
-                    x2m = x2.mean()
-                    import numpy as _np
-                    X = _np.column_stack([xv - xm, x2 - x2m])
+                    ss_tot = float(((yv - yv.mean()) ** 2).sum()) or 1.0
+                    # Linear R² via proper OLS (not external effect coefficient)
                     try:
-                        coef = _np.linalg.lstsq(
-                            _np.column_stack([_np.ones(len(X)), X]), yv, rcond=None
-                        )[0]
-                        quad_pred = coef[0] + coef[1] * (xv - xm) + coef[2] * (x2 - x2m)
-                        ss_res_quad = ((yv - quad_pred) ** 2).sum()
-                        r2_quad = 1 - ss_res_quad / ss_tot
-                        if r2_quad - r2_lin > 0.05 and n >= 15:
-                            insights.append({
-                                "icon": "⚡", "color": P_WARNING,
-                                "heading": "Non-linear relationship detected",
-                                "body": (f"A quadratic fit explains {r2_quad*100:.1f}% vs linear {r2_lin*100:.1f}% "
-                                         f"of {outcome} variation. The relationship between "
-                                         f"{treatment} and {outcome} may have diminishing returns "
-                                         "or a threshold. Try log-log or polynomial regression."),
-                            })
+                        Xlin = _np.column_stack([_np.ones(len(xv)), xv])
+                        coef_lin = _np.linalg.lstsq(Xlin, yv, rcond=None)[0]
+                        lin_pred = coef_lin[0] + coef_lin[1] * xv
+                        r2_lin = max(0.0, 1.0 - ((yv - lin_pred) ** 2).sum() / ss_tot)
                     except Exception:
-                        pass
+                        r2_lin = 0.0
+                    # Quadratic R²
+                    try:
+                        xm = xv.mean()
+                        x2 = (xv - xm) ** 2
+                        Xquad = _np.column_stack([_np.ones(len(xv)), xv - xm, x2 - x2.mean()])
+                        coef_quad = _np.linalg.lstsq(Xquad, yv, rcond=None)[0]
+                        quad_pred = Xquad @ coef_quad
+                        r2_quad = max(0.0, 1.0 - ((yv - quad_pred) ** 2).sum() / ss_tot)
+                    except Exception:
+                        r2_quad = 0.0
+                    # Only flag non-linearity when quadratic meaningfully beats linear
+                    if r2_quad - r2_lin > 0.05 and r2_lin >= 0.0 and r2_quad > 0.02:
+                        insights.append({
+                            "icon": "⚡", "color": P_WARNING,
+                            "heading": "Non-linear relationship detected",
+                            "body": (f"A quadratic fit explains {r2_quad*100:.1f}% vs linear {r2_lin*100:.1f}% "
+                                     f"of {outcome} variation. The relationship between "
+                                     f"{treatment} and {outcome} may have diminishing returns "
+                                     "or a threshold. Try log-log or polynomial regression."),
+                        })
             except Exception:
                 pass
 
-        # 6) Low treatment variation warning
+        # 6) Data quality / no-signal warning
+        r2_result = result.get("r_squared", 0) or 0
+        pval_result = result.get("pvalue", result.get("p_value", 1)) or 1
+        if r2_result < 0.005 and pval_result > 0.4 and n > 200:
+            insights.append({
+                "icon": "⚠", "color": P_WARNING,
+                "heading": "No detectable signal found",
+                "body": (
+                    f"R²={r2_result:.3f} and p={pval_result:.2f} on {n:,} observations — "
+                    "these variables appear unrelated in this dataset. "
+                    "Possible causes: (1) price-level columns instead of returns, "
+                    "(2) synthetic/random data, (3) wrong column match, "
+                    "(4) the effect exists but requires different controls or subsamples."
+                ),
+            })
+
+        # 7) Low treatment variation warning
         if treatment and treatment in df.columns:
             try:
                 tv = pd.to_numeric(df[treatment], errors="coerce").dropna()

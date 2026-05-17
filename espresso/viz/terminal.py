@@ -1175,16 +1175,21 @@ def render_era_breakdown(eras: list) -> None:
 # ---------------------------------------------------------------------------
 
 def render_verdict(verdict_text: str, score: dict, caveat: str = "") -> None:
+    import textwrap
+    width = max(60, min(console.size.width - 10, 100))
+    # Word-wrap the verdict text so it never gets cut off mid-word
+    wrapped_verdict = textwrap.fill(verdict_text, width=width - 4)
     body = (
-        f"\n  [bold]{verdict_text}[/bold]\n\n"
+        f"\n  [bold]{wrapped_verdict}[/bold]\n\n"
         + (f"  [{P['warning']}]Watch out for[/{P['warning']}]  [dim]{caveat}[/dim]\n\n" if caveat else "")
         + f"  [{score['color']}]{score['bullet']} {score['label']}  {score['score']}/100[/{score['color']}]\n"
     )
     console.print(Panel(
-        Text.from_markup(body),
+        body,
         title=f"[bold {P['brand']}]  {MASCOT}  ESPRESSO VERDICT  [/bold {P['brand']}]",
         border_style=f"bold {P['primary']}",
         padding=(0, 1),
+        expand=True,
     ))
 
 

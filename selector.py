@@ -12,6 +12,13 @@ from data_utils import is_panel_data, treatment_varies
 from model_specs import MODEL_SPECS, QUESTION_MODEL_MAP
 
 
+def _scalar_intent(val):
+    """Return primary element if val is a list (multi-predictor LLM response), else val."""
+    if isinstance(val, list):
+        return val[0] if val else None
+    return val
+
+
 def select_admissible_models(intent, data):
     """
     Filter candidate models for the given intent and dataset.
@@ -46,10 +53,10 @@ def select_admissible_models(intent, data):
             f for f in ("outcome", "treatment", "unit", "time")
             if f in spec["required_fields"]
             and intent.get(f) is not None
-            and intent[f] not in data.columns
+            and _scalar_intent(intent[f]) not in data.columns
         ]
         if missing_cols:
-            bad = {f: intent[f] for f in missing_cols}
+            bad = {f: _scalar_intent(intent[f]) for f in missing_cols}
             rejected[model] = f"Columns not in data: {bad}"
             continue
 
@@ -62,14 +69,15 @@ def select_admissible_models(intent, data):
                 continue
 
         if spec.get("requires_treatment_variation"):
-            if not treatment_varies(data, intent.get("treatment"), intent.get("unit")):
+            t_val = _scalar_intent(intent.get("treatment"))
+            if not treatment_varies(data, t_val, intent.get("unit")):
                 rejected[model] = (
-                    f"Predictor '{intent.get('treatment')}' does not vary within units"
+                    f"Predictor '{t_val}' does not vary within units"
                 )
                 continue
 
         outcome = intent.get("outcome")
-        treatment = intent.get("treatment")
+        treatment = _scalar_intent(intent.get("treatment"))
         if spec.get("requires_positive_outcome"):
             if outcome not in data.columns:
                 rejected[model] = f"Outcome column '{outcome}' not found in data"

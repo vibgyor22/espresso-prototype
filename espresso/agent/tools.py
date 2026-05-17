@@ -54,8 +54,24 @@ REGRESSION_RUNNERS = {
 
 def _get_col(field) -> Optional[str]:
     if isinstance(field, dict):
-        return field.get("value")
+        v = field.get("value")
+        if isinstance(v, list):
+            return v[0] if v else None
+        return v
+    if isinstance(field, list):
+        return field[0] if field else None
     return field
+
+
+def _get_extra_treatments(mapping_treatment) -> list[str]:
+    """Return additional treatment columns beyond the primary one (multi-predictor questions)."""
+    if isinstance(mapping_treatment, dict):
+        v = mapping_treatment.get("value")
+    else:
+        v = mapping_treatment
+    if isinstance(v, list) and len(v) > 1:
+        return list(v[1:])
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +168,11 @@ def prepare_data(df: pd.DataFrame, mapping: dict, intent: dict) -> tuple[pd.Data
         out_intent["outcome"] = outcome_val
     if treatment_val:
         out_intent["treatment"] = treatment_val
+    # Store additional predictors for multi-predictor comparison
+    extra = _get_extra_treatments(mapping.get("treatment"))
+    extra_valid = [c for c in extra if c and c in df.columns]
+    if extra_valid:
+        out_intent["_extra_treatments"] = extra_valid
     time_val = _get_col(mapping.get("time"))
     if time_val:
         out_intent["time"] = time_val

@@ -158,6 +158,52 @@ class Coordinator:
                         + ("I pivoted year columns into long form. " if mapping.get("pivot") else "")
                         + (f"I also focused on '{intent.get('identified_unit')}' as you asked." if intent.get("identified_unit") else "")))
 
+        # 3b) Reject categorical/string outcome columns — remap to a numeric candidate
+        outcome_col = intent.get("outcome")
+        if outcome_col and outcome_col in self.s.df.columns:
+            if not pd.api.types.is_numeric_dtype(self.s.df[outcome_col]):
+                numeric_candidates = [
+                    c for c in self.s.df.columns
+                    if pd.api.types.is_numeric_dtype(self.s.df[c])
+                    and c != outcome_col
+                    and self.s.df[c].nunique() > 5
+                ]
+                if numeric_candidates:
+                    new_outcome = numeric_candidates[0]
+                    self._emit_thought(
+                        f"Outcome '{outcome_col}' is non-numeric (categorical). "
+                        f"Remapping to '{new_outcome}' which is the first numeric candidate."
+                    )
+                    intent["outcome"] = new_outcome
+                    self.s.intent = intent
+
+        # 3c) Lag construction — when question asks about lead/lag/predict future/Granger
+        _lag_keywords = ("lag", "lead", "predict future", "granger", "future unemployment",
+                         "future stock", "future return", "future volatility", "predict next")
+        q_lower = question.lower()
+        if any(kw in q_lower for kw in _lag_keywords):
+            treatment_col = intent.get("treatment")
+            time_col_lag = intent.get("time")
+            if (treatment_col and treatment_col in self.s.df.columns
+                    and time_col_lag and time_col_lag in self.s.df.columns):
+                try:
+                    lag_col = f"{treatment_col}_lag1"
+                    if lag_col not in self.s.df.columns:
+                        sort_cols = [c for c in (intent.get("unit"), time_col_lag) if c and c in self.s.df.columns]
+                        df_sorted = self.s.df.sort_values(sort_cols) if sort_cols else self.s.df.copy()
+                        if intent.get("unit") and intent["unit"] in self.s.df.columns:
+                            df_sorted[lag_col] = df_sorted.groupby(intent["unit"])[treatment_col].shift(1)
+                        else:
+                            df_sorted[lag_col] = df_sorted[treatment_col].shift(1)
+                        self.s.df = df_sorted
+                    intent["treatment"] = lag_col
+                    self.s.intent = intent
+                    self._emit_thought(
+                        f"Lag detected in question — using 1-period lagged {treatment_col} as predictor."
+                    )
+                except Exception:
+                    pass
+
         # 4) Select model
         sel = T.select_model(intent, self.s.df, override=self.s.overrides.get("model"))
 
@@ -343,8 +389,8 @@ class Coordinator:
             eff = result.get("treatment_effect", result.get("slope", result.get("effect", 0))) or 0
             se  = result.get("se", 0) or 0
             pval = result.get("pvalue", result.get("p_value", 1)) or 1
-            ci_lo = result.get("ci_lower", eff - 1.96 * se)
-            ci_hi = result.get("ci_upper", eff + 1.96 * se)
+            ci_lo = _scalar_ci(result.get("ci_lower"), eff, se, -1.96)
+            ci_hi = _scalar_ci(result.get("ci_upper"), eff, se, +1.96)
             r2   = result.get("r_squared", 0) or 0
             n    = result.get("n_obs", "?")
             causal = self.s.model_key == "diff_in_diff"
@@ -391,8 +437,8 @@ class Coordinator:
             eff = result.get("treatment_effect", result.get("slope", result.get("effect", 0))) or 0
             se = result.get("se", 0) or 0
             pval = result.get("pvalue", result.get("p_value", 1)) or 1
-            ci_lo = result.get("ci_lower", eff - 1.96 * se)
-            ci_hi = result.get("ci_upper", eff + 1.96 * se)
+            ci_lo = _scalar_ci(result.get("ci_lower"), eff, se, -1.96)
+            ci_hi = _scalar_ci(result.get("ci_upper"), eff, se, +1.96)
             r2 = result.get("r_squared", 0) or 0
             n = result.get("n_obs", 0)
             with thinking("translating to plain English…"):
@@ -461,8 +507,8 @@ class Coordinator:
             eff = result.get("treatment_effect", result.get("slope", result.get("effect", 0))) or 0
             se = result.get("se", 0) or 0
             pval = result.get("pvalue", result.get("p_value", 1)) or 1
-            ci_lo = result.get("ci_lower", eff - 1.96 * se)
-            ci_hi = result.get("ci_upper", eff + 1.96 * se)
+            ci_lo = _scalar_ci(result.get("ci_lower"), eff, se, -1.96)
+            ci_hi = _scalar_ci(result.get("ci_upper"), eff, se, +1.96)
             with thinking("writing verdict…"):
                 verdict_text = C.generate_verdict(
                     outcome=intent.get("outcome", "outcome"),
@@ -494,8 +540,8 @@ class Coordinator:
             eff2  = result.get("treatment_effect", result.get("slope", result.get("effect", 0))) or 0
             se2   = result.get("se", 0) or 0
             pval2 = result.get("pvalue", result.get("p_value", 1)) or 1
-            ci_lo2 = result.get("ci_lower", eff2 - 1.96 * se2)
-            ci_hi2 = result.get("ci_upper", eff2 + 1.96 * se2)
+            ci_lo2 = _scalar_ci(result.get("ci_lower"), eff2, se2, -1.96)
+            ci_hi2 = _scalar_ci(result.get("ci_upper"), eff2, se2, +1.96)
             r2_2  = result.get("r_squared", 0) or 0
             n2    = result.get("n_obs", 0) or 0
             with thinking("writing deep analysis…"):
@@ -544,6 +590,62 @@ class Coordinator:
                      if l.strip() and len(l.strip()) > 10), ""
                 )[:120]
                 render_verdict(verdict_text, score, caveat=first_caveat)
+
+        # 8b) Multi-predictor comparison — run each extra treatment separately and compare
+        extra_treatments = intent.get("_extra_treatments", [])
+        if extra_treatments and self.s.model_key not in T.FORECAST_RUNNERS and self.verbose:
+            comparison_rows = []
+            primary_t = intent.get("treatment", "")
+            primary_eff = result.get("treatment_effect", result.get("slope", result.get("effect", 0))) or 0
+            primary_p = result.get("pvalue", result.get("p_value", 1)) or 1
+            primary_r2 = result.get("r_squared", 0) or 0
+            comparison_rows.append((primary_t, primary_eff, primary_p, primary_r2))
+
+            for extra_t in extra_treatments[:3]:
+                if extra_t not in self.s.df.columns:
+                    continue
+                try:
+                    extra_intent = dict(intent)
+                    extra_intent["treatment"] = extra_t
+                    extra_intent.pop("_extra_treatments", None)
+                    extra_sel = T.select_model(extra_intent, self.s.df)
+                    if not extra_sel.get("error"):
+                        extra_result = T.run_model(extra_sel["model_key"], self.s.df, extra_intent)
+                        if "error" not in extra_result:
+                            e_eff = extra_result.get("treatment_effect", extra_result.get("slope", extra_result.get("effect", 0))) or 0
+                            e_p = extra_result.get("pvalue", extra_result.get("p_value", 1)) or 1
+                            e_r2 = extra_result.get("r_squared", 0) or 0
+                            comparison_rows.append((extra_t, e_eff, e_p, e_r2))
+                except Exception:
+                    pass
+
+            if len(comparison_rows) > 1:
+                from rich.table import Table as _Table
+                cmp_table = _Table(
+                    title="[bold #D4A85A]Predictor Comparison[/bold #D4A85A]",
+                    border_style="#6F4E37",
+                    show_lines=False,
+                )
+                cmp_table.add_column("Predictor", style="bold")
+                cmp_table.add_column("Effect", justify="right")
+                cmp_table.add_column("p-value", justify="right")
+                cmp_table.add_column("R²", justify="right")
+                cmp_table.add_column("Stronger?", justify="center")
+                best_r2 = max(r for _, _, _, r in comparison_rows)
+                for tname, eff_v, pv, r2v in comparison_rows:
+                    star = "★" if r2v >= best_r2 - 0.001 else ""
+                    sig_col = "#6AB08A" if pv < 0.05 else ("#F39C12" if pv < 0.10 else "#95A5A6")
+                    cmp_table.add_row(
+                        tname,
+                        f"[{sig_col}]{eff_v:+.4f}[/{sig_col}]",
+                        f"[{sig_col}]{pv:.3f}[/{sig_col}]",
+                        f"{r2v:.3f}",
+                        f"[bold #D4A85A]{star}[/bold #D4A85A]",
+                    )
+                console.print(cmp_table)
+                self._emit_thought(
+                    f"Multi-predictor comparison: ran {len(comparison_rows)} predictors for {intent.get('outcome')}."
+                )
 
         # 9) Follow-ups
         self._emit("suggest_followups", {},
@@ -598,6 +700,18 @@ def _pp(mapping_field) -> str:
     else:
         v = mapping_field
     return v if v else ""
+
+
+def _scalar_ci(v, eff: float = 0.0, se: float = 0.0, multiplier: float = 1.96) -> float:
+    """Safely extract a scalar CI bound from a result value (handles ARIMA list returns)."""
+    if v is None:
+        return eff + multiplier * se
+    if isinstance(v, (list, tuple)):
+        v = v[0] if v else eff + multiplier * se
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return eff + multiplier * se
 
 
 def _result_preview(model_key: str, result: dict) -> str:
